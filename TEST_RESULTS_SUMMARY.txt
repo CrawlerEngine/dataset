@@ -1,0 +1,87 @@
+=== ALL TEST RESULTS ===
+
+1. Unit Tests - User-Agent Matching (test_robots_ua_priority)
+✓ googlebot/1.2 -> googlebot
+✓ bingbot* -> bingbot
+✓ crawler -> crawler
+✓ test/agent/1.0 -> test
+✓ Exact match: googlebot == googlebot
+✓ Wildcard match: * matches any-bot
+✓ Version handling: googlebot/1.2 matches googlebot/2.0
+✓ Case-insensitive: GoogleBot matches googlebot
+✓ Non-matching: googlebot != bingbot
+✓ Parsed 2 rule groups
+✓ Googlebot rule has specificity 3 (exact match)
+✓ Wildcard rule has specificity 1
+✓ Allow directive parsed
+✓ /private/public in allows list
+✓ /private in disallows list
+✓ Parsed 3 rule groups
+✓ First testbot rule has specificity 3
+✓ Second testbot rule has specificity 3
+✓ Googlebot disallows /admin
+✓ Wildcard disallows /secret
+✓ Root disallow parsed
+RESULTS: 21 tests passed, 0 failed
+✓ All tests passed!
+
+2. Integration Tests (test_robots_integration)
+✓ Parsed 2 rule groups
+✓ Googlebot rule has higher specificity
+✓ Parsed 3 rule groups (2 googlebot + 1 wildcard)
+✓ Specificity levels correct
+✓ Both googlebot rule groups parsed correctly
+✓ Complex paths parsed correctly
+✓ Individual paths stored correctly
+✓ Case-insensitive matching works
+✓ Different agents don't match
+✓ Empty Disallow parsed
+✓ Version suffix ignored in matching
+✓ Different versions match same normalized agent
+✓ Root disallow (/) parsed correctly
+✓ Asterisk suffix removed from user-agent
+✓ crawler* matches crawler
+✓ Wildcard fallback logic correct
+RESULTS: 16 tests passed, 0 failed
+✓ All integration tests passed!
+
+3. Wildcard Path Matching Tests (test_robots_wildcard)
+✓ /fish matches /fish
+✓ /fish matches /fishheads
+✓ /fish matches /fish.html
+✓ /fish also matches /fish/ (prefix)
+✓ /fish does NOT match /catfish
+✓ /$  matches /
+✓ /$  does NOT match /test
+✓ /$  does NOT match /test/
+✓ /*.php matches /index.php
+✓ /*.php matches /dir/index.php
+✓ /*.php matches /dir/file.php
+✓ /*.php does NOT match /file.html
+✓ /*.php does NOT match /php
+✓ /*.php$ matches /index.php
+✓ /*.php$ matches /dir/test.php
+✓ /*.php$ does NOT match /index.php.bak
+✓ /*.php$ does NOT match /file.html
+✓ /fish*.php matches /fish.php
+✓ /fish*.php matches /fish123.php
+✓ /fish*.php matches /fishheads.php
+✓ /fish*.php does NOT match /catfish.php
+✓ /fish*.php does NOT match /fish.html
+✓ Longest match /admin allowed when both / and /admin apply
+✓ Disallow / when no longer allow applies
+✓ Allow wins over Disallow when equal length
+✓ /fish/ matches /fish/salmon.html
+✓ /fish/ does NOT match /fish
+✓ /fish/ does NOT match /fish.html
+✓ /*.php* matches /index.php
+✓ /*.php* matches /index.php.bak
+✓ /*.php* matches /file.php5
+✓ [Google] /fish matches /fish
+✓ [Google] /fish matches /fish.html
+✓ [Google] /fish matches /fishheads
+✓ [Google] /fish does NOT match /catfish
+✓ [Google] /*.php matches /index.php
+✓ [Google] /*.php matches /dir/file.php
+RESULTS: 37 tests passed, 0 failed
+✓ All wildcard tests passed!

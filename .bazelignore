@@ -1,0 +1,28 @@
+# Ignore legacy CMake files and artifacts
+CMakeLists.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+build/
+
+# Ignore documentation
+docs/
+
+# Ignore version control
+.git/
+.gitignore
+.gitattributes
+
+# Ignore IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Ignore build artifacts
+*.o
+*.a
+*.so
+*.exe
+*.dylib

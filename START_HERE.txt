@@ -1,0 +1,140 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                    DATASET CRAWLER - C++ PROJECT                          ║
+║           Web Crawler with Parquet Export for AI Training Data             ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+🎯 WHAT IS THIS PROJECT?
+═══════════════════════════════════════════════════════════════════════════════
+
+A complete C++ web crawler application that collects web data and saves it in 
+Parquet format (optimized for machine learning and data science).
+
+✨ KEY FEATURES:
+  ✓ Multi-threaded web crawling
+  ✓ Parquet format export (5-10x smaller than CSV)
+  ✓ CSV export for compatibility
+  ✓ Configurable timeouts and headers
+  ✓ Full error handling
+  ✓ Docker support included
+  ✓ Python utilities for data analysis
+  ✓ Complete documentation
+
+⚡ QUICK START (3 STEPS):
+═══════════════════════════════════════════════════════════════════════════════
+
+1. INSTALL DEPENDENCIES:
+   $ ./install_dependencies.sh
+
+2. BUILD THE PROJECT:
+   $ make build
+
+3. RUN THE CRAWLER:
+   $ ./build/crawler
+
+Output: dataset.parquet + dataset.csv
+
+📚 DOCUMENTATION:
+═══════════════════════════════════════════════════════════════════════════════
+
+START HERE:     QUICKSTART.md      (Read this first - 5 min read)
+Full Docs:      README.md          (Complete API reference)
+Developer:      DEVELOPER.md       (Architecture & extending)
+Project Info:   INDEX.md           (File listing & structure)
+Quick Ref:      CHEATSHEET.md      (Command shortcuts)
+
+🔧 WHAT'S INCLUDED:
+═══════════════════════════════════════════════════════════════════════════════
+
+C++ Code:
+  • WebCrawler      - Single-threaded HTTP client
+  • AdvancedCrawler - Multi-threaded crawler with thread pool
+  • ParquetWriter   - Parquet file export
+  • 6 working examples
+
+Build System:
+  • CMakeLists.txt  - CMake configuration
+  • Makefile        - Convenient build commands
+  • Dockerfile      - Container image
+  • Docker Compose  - Orchestration
+
+Python Tools:
+  • parquet_utils.py - Data analysis and format conversion
+
+📦 DEPENDENCIES (AUTO-INSTALLED):
+═══════════════════════════════════════════════════════════════════════════════
+
+System:
+  • CMake 3.20+
+  • C++17 compiler (GCC/Clang)
+  • libcurl4-openssl-dev
+  • libparquet-dev
+  • libparquet0
+
+Python:
+  • pandas
+  • pyarrow
+  • numpy
+
+Optional:
+  • Docker & Docker Compose
+
+💡 USAGE EXAMPLES:
+═══════════════════════════════════════════════════════════════════════════════
+
+COMMAND LINE:
+  $ ./build/crawler                     # Basic crawl
+  $ make run                            # Full build + run
+  $ docker-compose up                   # Docker mode
+
+PYTHON ANALYSIS:
+  $ python3 scripts/parquet_utils.py info dataset.parquet
+  $ python3 scripts/parquet_utils.py to-csv dataset.parquet out.csv
+  $ python3 scripts/parquet_utils.py merge part*.parquet -o final.parquet
+
+C++ CODE:
+  #include "crawler.h"
+  WebCrawler crawler;
+  auto records = crawler.crawl_urls(urls);
+  
+  ParquetDatasetWriter writer;
+  writer.write_records("output.parquet", records);
+
+📊 PROJECT STATISTICS:
+═══════════════════════════════════════════════════════════════════════════════
+
+Total Files:        56
+C++ Code Lines:     808
+Documentation:      4 files (~40 KB)
+Total Size:         372 KB
+Build Time:         ~10 seconds
+
+🚀 NEXT STEPS:
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Read QUICKSTART.md (best way to get started)
+2. Install: ./install_dependencies.sh
+3. Build: make build
+4. Run: ./run.sh run
+5. Analyze: python3 scripts/parquet_utils.py info dataset.parquet
+6. Customize: Edit config.json and urls.txt for your data
+
+❓ HELP & SUPPORT:
+═══════════════════════════════════════════════════════════════════════════════
+
+Documentation:   Read QUICKSTART.md or README.md
+Examples:        Check examples/examples.cpp
+Commands:        Run './run.sh help' or 'make help'
+Architecture:    See DEVELOPER.md for internals
+Troubleshooting: Check QUICKSTART.md "Разрешение проблем" section
+
+📜 LICENSE:
+═══════════════════════════════════════════════════════════════════════════════
+
+MIT License - Free for personal and commercial use
+See LICENSE file for details
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Ready to go! Open QUICKSTART.md to begin.
+
+═══════════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,24 @@
+# Bazel configuration file
+
+# C++ standard
+build --cxxopt=-std=c++17
+
+# Optimization
+build -c opt
+
+# Test options
+test --test_output=summary
+
+# Enable colored output
+common --color=yes
+
+# Enable parallel builds
+build --jobs=auto
+
+# Compiler options
+build --cxxopt=-Wall
+build --cxxopt=-Wextra
+build --cxxopt=-Wno-unused-parameter
+
+# Platform
+build --incompatible_enable_cc_toolchain_resolution

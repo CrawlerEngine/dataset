@@ -1,0 +1,64 @@
+{
+  "name": "Dataset Crawler",
+  "version": "1.0.0",
+  "description": "C++ Web Crawler for collecting AI training datasets with Parquet support",
+  "author": "Your Name",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-repo/dataset-crawler"
+  },
+  "keywords": [
+    "crawler",
+    "web-scraping",
+    "dataset",
+    "parquet",
+    "ai-training",
+    "machine-learning",
+    "c++"
+  ],
+  "features": [
+    "Multi-threaded web crawling",
+    "Parquet output format",
+    "CSV export",
+    "Configurable headers and timeouts",
+    "Error handling and retries",
+    "Statistics and logging",
+    "Docker support"
+  ],
+  "requirements": {
+    "system": [
+      "CMake >= 3.20",
+      "C++17 compiler",
+      "libcurl >= 7.0",
+      "Apache Arrow >= 5.0",
+      "libparquet >= 1.0"
+    ],
+    "optional": [
+      "Docker",
+      "Docker Compose",
+      "Python 3.8+",
+      "clang-format (for code formatting)"
+    ]
+  },
+  "directories": {
+    "include": "Header files with class definitions",
+    "src": "Implementation files",
+    "examples": "Usage examples",
+    "scripts": "Python utility scripts",
+    "build": "Build output directory (generated)"
+  },
+  "main_classes": {
+    "WebCrawler": "Basic single-threaded web crawler",
+    "AdvancedCrawler": "Multi-threaded crawler with thread pool",
+    "ParquetDatasetWriter": "Write data to Parquet and CSV formats",
+    "DataRecord": "Structure containing fetched page data"
+  },
+  "usage": {
+    "install": "make install-deps",
+    "build": "make build",
+    "run": "./run.sh run",
+    "docker": "docker-compose up",
+    "python_utils": "python3 scripts/parquet_utils.py --help"
+  }
+}
