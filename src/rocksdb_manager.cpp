@@ -4,6 +4,7 @@
 #include <rocksdb/options.h>
 #include <sstream>
 #include <iomanip>
+#include <memory>
 
 RocksDBManager::RocksDBManager(const std::string& db_path)
     : db_path_(db_path), db_(nullptr) {
@@ -35,18 +36,19 @@ bool RocksDBManager::init() {
     return true;
 }
 
-bool RocksDBManager::enqueue_url(const std::string& url) {
+bool RocksDBManager::enqueue_url(const std::string& url, int priority) {
     if (!db_) return false;
     
-    // Get current tail index
+    // Get current tail index for priority
     std::string tail_str;
     int tail = 0;
-    if (db_->Get(rocksdb::ReadOptions(), "queue:tail", &tail_str).ok()) {
+    std::string tail_key = make_priority_tail_key(priority);
+    if (db_->Get(rocksdb::ReadOptions(), tail_key, &tail_str).ok()) {
         tail = std::stoi(tail_str);
     }
     
-    // Store URL at tail
-    std::string key = make_queue_key(tail);
+    // Store URL at tail for priority queue
+    std::string key = make_priority_queue_key(priority, tail);
     rocksdb::Status status = db_->Put(rocksdb::WriteOptions(), key, url);
     if (!status.ok()) {
         Logger::instance().error("RocksDB: Failed to enqueue URL: " + status.ToString());
@@ -54,53 +56,53 @@ bool RocksDBManager::enqueue_url(const std::string& url) {
     }
     
     // Increment tail
-    status = db_->Put(rocksdb::WriteOptions(), "queue:tail", std::to_string(tail + 1));
+    status = db_->Put(rocksdb::WriteOptions(), tail_key, std::to_string(tail + 1));
     if (!status.ok()) {
         Logger::instance().error("RocksDB: Failed to update queue tail: " + status.ToString());
         return false;
     }
+
+    // Increment queue size
+    std::string size_str;
+    int size = 0;
+    if (db_->Get(rocksdb::ReadOptions(), "pqueue:size", &size_str).ok()) {
+        size = std::stoi(size_str);
+    }
+    db_->Put(rocksdb::WriteOptions(), "pqueue:size", std::to_string(size + 1));
     
     return true;
 }
 
 std::string RocksDBManager::dequeue_url() {
     if (!db_) return "";
-    
-    // Get current head index
-    std::string head_str;
-    int head = 0;
-    if (db_->Get(rocksdb::ReadOptions(), "queue:head", &head_str).ok()) {
-        head = std::stoi(head_str);
+
+    std::unique_ptr<rocksdb::Iterator> it(db_->NewIterator(rocksdb::ReadOptions()));
+    const std::string prefix = "pqueue:item:";
+    for (it->Seek(prefix); it->Valid(); it->Next()) {
+        std::string key = it->key().ToString();
+        if (key.compare(0, prefix.size(), prefix) != 0) {
+            break;
+        }
+        std::string value = it->value().ToString();
+        rocksdb::Status status = db_->Delete(rocksdb::WriteOptions(), key);
+        if (!status.ok()) {
+            Logger::instance().error("RocksDB: Failed to dequeue URL: " + status.ToString());
+            return "";
+        }
+
+        std::string size_str;
+        int size = 0;
+        if (db_->Get(rocksdb::ReadOptions(), "pqueue:size", &size_str).ok()) {
+            size = std::stoi(size_str);
+        }
+        if (size > 0) {
+            db_->Put(rocksdb::WriteOptions(), "pqueue:size", std::to_string(size - 1));
+        }
+
+        return value;
     }
-    
-    // Get tail index
-    std::string tail_str;
-    int tail = 0;
-    if (db_->Get(rocksdb::ReadOptions(), "queue:tail", &tail_str).ok()) {
-        tail = std::stoi(tail_str);
-    }
-    
-    // Check if queue is empty
-    if (head >= tail) {
-        return "";
-    }
-    
-    // Get URL at head
-    std::string key = make_queue_key(head);
-    std::string value;
-    rocksdb::Status status = db_->Get(rocksdb::ReadOptions(), key, &value);
-    if (!status.ok()) {
-        return "";
-    }
-    
-    // Increment head
-    status = db_->Put(rocksdb::WriteOptions(), "queue:head", std::to_string(head + 1));
-    if (!status.ok()) {
-        Logger::instance().error("RocksDB: Failed to update queue head: " + status.ToString());
-        return "";
-    }
-    
-    return value;
+
+    return "";
 }
 
 bool RocksDBManager::has_queued_urls() {
@@ -109,20 +111,23 @@ bool RocksDBManager::has_queued_urls() {
 
 int RocksDBManager::get_queue_size() {
     if (!db_) return 0;
-    
-    // Get head and tail indices
-    std::string head_str, tail_str;
-    int head = 0, tail = 0;
-    
-    if (db_->Get(rocksdb::ReadOptions(), "queue:head", &head_str).ok()) {
-        head = std::stoi(head_str);
+
+    std::string size_str;
+    if (db_->Get(rocksdb::ReadOptions(), "pqueue:size", &size_str).ok()) {
+        return std::stoi(size_str);
     }
-    
-    if (db_->Get(rocksdb::ReadOptions(), "queue:tail", &tail_str).ok()) {
-        tail = std::stoi(tail_str);
+
+    int count = 0;
+    std::unique_ptr<rocksdb::Iterator> it(db_->NewIterator(rocksdb::ReadOptions()));
+    const std::string prefix = "pqueue:item:";
+    for (it->Seek(prefix); it->Valid(); it->Next()) {
+        std::string key = it->key().ToString();
+        if (key.compare(0, prefix.size(), prefix) != 0) {
+            break;
+        }
+        ++count;
     }
-    
-    return (tail >= head) ? (tail - head) : 0;
+    return count;
 }
 
 bool RocksDBManager::mark_visited(const std::string& url) {
@@ -193,6 +198,31 @@ bool RocksDBManager::has_cached_html(const std::string& url) {
     return status.ok();
 }
 
+bool RocksDBManager::add_link_edge(const std::string& from_url, const std::string& to_url) {
+    if (!db_) return false;
+
+    rocksdb::Status status = db_->Put(rocksdb::WriteOptions(),
+                                      make_link_edge_key(from_url, to_url), "1");
+    return status.ok();
+}
+
+std::vector<std::string> RocksDBManager::get_outgoing_links(const std::string& from_url) {
+    std::vector<std::string> links;
+    if (!db_) return links;
+
+    std::string prefix = make_link_prefix(from_url);
+    std::unique_ptr<rocksdb::Iterator> it(db_->NewIterator(rocksdb::ReadOptions()));
+    for (it->Seek(prefix); it->Valid(); it->Next()) {
+        std::string key = it->key().ToString();
+        if (key.compare(0, prefix.size(), prefix) != 0) {
+            break;
+        }
+        links.push_back(key.substr(prefix.size()));
+    }
+
+    return links;
+}
+
 std::string RocksDBManager::get_stats() {
     std::ostringstream oss;
     oss << "RocksDB Statistics:\n";
@@ -212,16 +242,31 @@ void RocksDBManager::clear_all() {
     delete it;
 }
 
-std::string RocksDBManager::make_queue_key(int index) const {
-    std::ostringstream oss;
-    oss << "queue:" << std::setfill('0') << std::setw(8) << index;
-    return oss.str();
-}
-
 std::string RocksDBManager::make_visited_key(const std::string& url) const {
     return "visited:" + url;
 }
 
 std::string RocksDBManager::make_cache_key(const std::string& url) const {
     return "cache:" + url;
+}
+
+std::string RocksDBManager::make_priority_queue_key(int priority, int index) const {
+    std::ostringstream oss;
+    oss << "pqueue:item:" << std::setfill('0') << std::setw(4) << priority
+        << ":" << std::setw(12) << index;
+    return oss.str();
+}
+
+std::string RocksDBManager::make_priority_tail_key(int priority) const {
+    std::ostringstream oss;
+    oss << "pqueue:tail:" << std::setfill('0') << std::setw(4) << priority;
+    return oss.str();
+}
+
+std::string RocksDBManager::make_link_edge_key(const std::string& from_url, const std::string& to_url) const {
+    return "graph:" + from_url + "->" + to_url;
+}
+
+std::string RocksDBManager::make_link_prefix(const std::string& from_url) const {
+    return "graph:" + from_url + "->";
 }
