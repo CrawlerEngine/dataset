@@ -7,6 +7,8 @@
 #include <fcntl.h>
 #include <map>
 #include <netdb.h>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
 #include <poll.h>
 #include <sstream>
 #include <string>
@@ -67,6 +69,108 @@ std::string to_lower(std::string input) {
     std::transform(input.begin(), input.end(), input.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return input;
+}
+
+void set_socket_timeouts(int socket_fd, std::chrono::seconds timeout) {
+    struct timeval tv {};
+    tv.tv_sec = static_cast<long>(timeout.count());
+    tv.tv_usec = 0;
+    setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
+int connect_with_timeout(struct addrinfo* addr_info, std::chrono::seconds timeout, std::string& error) {
+    int socket_fd = socket(addr_info->ai_family, addr_info->ai_socktype, addr_info->ai_protocol);
+    if (socket_fd < 0) {
+        error = std::strerror(errno);
+        return -1;
+    }
+
+    int flags = fcntl(socket_fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(socket_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        error = "failed to set non-blocking socket";
+        close(socket_fd);
+        return -1;
+    }
+
+    int connect_result = connect(socket_fd, addr_info->ai_addr, addr_info->ai_addrlen);
+    if (connect_result == 0) {
+        fcntl(socket_fd, F_SETFL, flags);
+        set_socket_timeouts(socket_fd, timeout);
+        return socket_fd;
+    }
+    if (errno != EINPROGRESS) {
+        error = std::strerror(errno);
+        close(socket_fd);
+        return -1;
+    }
+
+    struct pollfd pfd {};
+    pfd.fd = socket_fd;
+    pfd.events = POLLOUT;
+    int poll_result = poll(&pfd, 1, static_cast<int>(timeout.count() * 1000));
+    if (poll_result <= 0) {
+        error = poll_result == 0 ? "connect timeout" : std::strerror(errno);
+        close(socket_fd);
+        return -1;
+    }
+
+    int socket_error = 0;
+    socklen_t len = sizeof(socket_error);
+    if (getsockopt(socket_fd, SOL_SOCKET, SO_ERROR, &socket_error, &len) != 0 || socket_error != 0) {
+        error = socket_error == 0 ? "connect failed" : std::strerror(socket_error);
+        close(socket_fd);
+        return -1;
+    }
+
+    fcntl(socket_fd, F_SETFL, flags);
+    set_socket_timeouts(socket_fd, timeout);
+    return socket_fd;
+}
+
+RawHttpResponse parse_http_response(const std::string& buffer, const std::string& url) {
+    RawHttpResponse response;
+    auto header_end = buffer.find("\r\n\r\n");
+    if (header_end == std::string::npos) {
+        response.error_message = "invalid HTTP response";
+        return response;
+    }
+
+    std::string header_block = buffer.substr(0, header_end);
+    response.body = buffer.substr(header_end + 4);
+    response.final_url = url;
+
+    std::istringstream header_stream(header_block);
+    std::string status_line;
+    if (std::getline(header_stream, status_line)) {
+        if (!status_line.empty() && status_line.back() == '\r') {
+            status_line.pop_back();
+        }
+        response.http_version = parse_http_version(status_line);
+        std::istringstream status_parser(status_line);
+        std::string http_version;
+        status_parser >> http_version >> response.status_code;
+    }
+
+    std::string header_line;
+    while (std::getline(header_stream, header_line)) {
+        if (!header_line.empty() && header_line.back() == '\r') {
+            header_line.pop_back();
+        }
+        auto delimiter_pos = header_line.find(':');
+        if (delimiter_pos == std::string::npos) {
+            continue;
+        }
+        std::string key = to_lower(header_line.substr(0, delimiter_pos));
+        std::string value = header_line.substr(delimiter_pos + 1);
+        value.erase(0, value.find_first_not_of(" \t"));
+        if (key == "content-type") {
+            response.content_type = value;
+        }
+    }
+
+    response.success = response.status_code > 0;
+    return response;
 }
 
 class HttpFetchCoroutine : public CoroutineTask {
@@ -261,46 +365,7 @@ private:
     }
 
     void finalize_response() {
-        auto header_end = response_buffer_.find("\r\n\r\n");
-        if (header_end == std::string::npos) {
-            response_.error_message = "invalid HTTP response";
-            return;
-        }
-
-        std::string header_block = response_buffer_.substr(0, header_end);
-        response_.body = response_buffer_.substr(header_end + 4);
-        response_.final_url = url_;
-
-        std::istringstream header_stream(header_block);
-        std::string status_line;
-        if (std::getline(header_stream, status_line)) {
-            if (!status_line.empty() && status_line.back() == '\r') {
-                status_line.pop_back();
-            }
-            response_.http_version = parse_http_version(status_line);
-            std::istringstream status_parser(status_line);
-            std::string http_version;
-            status_parser >> http_version >> response_.status_code;
-        }
-
-        std::string header_line;
-        while (std::getline(header_stream, header_line)) {
-            if (!header_line.empty() && header_line.back() == '\r') {
-                header_line.pop_back();
-            }
-            auto delimiter_pos = header_line.find(':');
-            if (delimiter_pos == std::string::npos) {
-                continue;
-            }
-            std::string key = to_lower(header_line.substr(0, delimiter_pos));
-            std::string value = header_line.substr(delimiter_pos + 1);
-            value.erase(0, value.find_first_not_of(" \t"));
-            if (key == "content-type") {
-                response_.content_type = value;
-            }
-        }
-
-        response_.success = response_.status_code > 0;
+        response_ = parse_http_response(response_buffer_, url_);
     }
 
     std::string url_;
@@ -347,6 +412,113 @@ RawSocketHttpClient::RawSocketHttpClient(const RawSocketHttpConfig& config)
 RawHttpResponse RawSocketHttpClient::fetch(const std::string& url,
                                            const std::map<std::string, std::string>& headers) {
     RawHttpResponse response;
+    ParsedUrl parsed = parse_url(url);
+    if (parsed.valid && parsed.scheme == "https") {
+        int attempts = std::max(1, config_.retry.max_retries + 1);
+        for (int attempt = 0; attempt < attempts; ++attempt) {
+            std::string error;
+            struct addrinfo hints {};
+            hints.ai_family = AF_UNSPEC;
+            hints.ai_socktype = SOCK_STREAM;
+
+            struct addrinfo* addr_info = nullptr;
+            const std::string port_str = std::to_string(parsed.port);
+            int result = getaddrinfo(parsed.host.c_str(), port_str.c_str(), &hints, &addr_info);
+            if (result != 0) {
+                response.error_message = gai_strerror(result);
+                return response;
+            }
+
+            int socket_fd = connect_with_timeout(addr_info, config_.timeout, error);
+            if (socket_fd < 0) {
+                freeaddrinfo(addr_info);
+                response.error_message = error;
+                continue;
+            }
+
+            SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+            if (!ctx) {
+                response.error_message = "failed to create SSL context";
+                close(socket_fd);
+                freeaddrinfo(addr_info);
+                return response;
+            }
+
+            SSL* ssl = SSL_new(ctx);
+            if (!ssl) {
+                response.error_message = "failed to create SSL session";
+                SSL_CTX_free(ctx);
+                close(socket_fd);
+                freeaddrinfo(addr_info);
+                return response;
+            }
+
+            SSL_set_fd(ssl, socket_fd);
+            SSL_set_tlsext_host_name(ssl, parsed.host.c_str());
+            if (SSL_connect(ssl) <= 0) {
+                response.error_message = "TLS handshake failed";
+                SSL_free(ssl);
+                SSL_CTX_free(ctx);
+                close(socket_fd);
+                freeaddrinfo(addr_info);
+                continue;
+            }
+
+            std::ostringstream request_stream;
+            request_stream << "GET " << parsed.path << " HTTP/1.1\r\n";
+            request_stream << "Host: " << parsed.host << "\r\n";
+            request_stream << "Connection: close\r\n";
+            request_stream << "User-Agent: DatasetCrawler/1.0\r\n";
+            for (const auto& header : headers) {
+                request_stream << header.first << ": " << header.second << "\r\n";
+            }
+            request_stream << "\r\n";
+            std::string request = request_stream.str();
+
+            size_t total_written = 0;
+            while (total_written < request.size()) {
+                int written = SSL_write(ssl, request.data() + total_written,
+                                        static_cast<int>(request.size() - total_written));
+                if (written <= 0) {
+                    response.error_message = "TLS write failed";
+                    break;
+                }
+                total_written += static_cast<size_t>(written);
+            }
+
+            std::string response_buffer;
+            if (total_written == request.size()) {
+                char buffer[4096];
+                int read_bytes = 0;
+                while ((read_bytes = SSL_read(ssl, buffer, sizeof(buffer))) > 0) {
+                    response_buffer.append(buffer, static_cast<size_t>(read_bytes));
+                }
+                if (!response_buffer.empty()) {
+                    response = parse_http_response(response_buffer, url);
+                } else if (response.error_message.empty()) {
+                    response.error_message = "empty HTTPS response";
+                }
+            }
+
+            SSL_shutdown(ssl);
+            SSL_free(ssl);
+            SSL_CTX_free(ctx);
+            close(socket_fd);
+            freeaddrinfo(addr_info);
+
+            if (response.success) {
+                return response;
+            }
+
+            if (attempt + 1 < attempts) {
+                int backoff = config_.retry.retry_backoff_ms * (attempt + 1);
+                poll(nullptr, 0, backoff);
+            }
+        }
+
+        return response;
+    }
+
     int attempts = std::max(1, config_.retry.max_retries + 1);
     for (int attempt = 0; attempt < attempts; ++attempt) {
         auto task = std::make_shared<HttpFetchCoroutine>(url, headers, config_.timeout);
