@@ -23,6 +23,7 @@ struct RobotRule {
     std::vector<std::string> disallows;
     std::vector<std::string> allows;
     int specificity = 0;  // Higher = more specific (exact match > pattern > wildcard)
+    double crawl_delay_seconds = -1.0;
 };
 
 struct DataRecord {
@@ -125,7 +126,7 @@ public:
     /**
      * Public methods for testing robots.txt User-Agent matching
      */
-    bool matches_user_agent(const std::string& rule_agent, const std::string& crawler_agent);
+    bool matches_user_agent(const std::string& rule_agent, const std::string& crawler_agent) const;
     std::string normalize_user_agent(const std::string& agent);
     std::vector<RobotRule> parse_robots_txt(const std::string& host, const std::string& robots_content);
 
@@ -178,10 +179,20 @@ private:
     long total_bytes_downloaded_;
     long total_duration_ms_;
     std::vector<long> request_durations_;  // For calculating avg
+    long last_request_duration_ms_;
+    double latency_ema_ms_;
+    int consecutive_failures_;
+    int consecutive_successes_;
+    int last_delay_ms_;
+    std::chrono::steady_clock::time_point last_request_time_;
+    std::string current_domain_;
     
     std::map<std::string, bool> robots_cache_;
     std::map<std::string, std::vector<std::string>> robots_sitemaps_cache_;
     std::map<std::string, std::vector<RobotRule>> robots_rules_cache_;  // Cache parsed robots.txt rules
+    std::map<std::string, double> robots_crawl_delay_cache_;
+    std::map<std::string, std::chrono::steady_clock::time_point> robots_cache_time_;
+    std::map<std::string, std::chrono::steady_clock::time_point> robots_sitemaps_cache_time_;
     std::chrono::steady_clock::time_point crawl_start_time_;
     
     // Memory-efficient caches using STL hash containers
@@ -221,6 +232,9 @@ private:
     // Encoding detection and conversion
     std::string detect_encoding(const std::string& content, const std::string& content_type);
     std::string convert_to_utf8(const std::string& content, const std::string& from_encoding);
+    void apply_adaptive_delay(int status_code);
+    double get_crawl_delay_for_domain(const std::string& domain) const;
+    std::vector<std::string> parse_sitemap_index_xml(const std::string& xml_content);
 };
 
 #endif

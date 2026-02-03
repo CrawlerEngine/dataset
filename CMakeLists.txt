@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Find required packages
 find_package(CURL REQUIRED)
 find_package(RocksDB REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -20,6 +21,7 @@ set(SOURCES
     src/config_loader.cpp
     src/text_extractor.cpp
     src/rocksdb_manager.cpp
+    src/raw_socket_http.cpp
 )
 
 # Create executable
@@ -31,6 +33,8 @@ target_link_libraries(crawler
     CURL::libcurl
     rocksdb
     gumbo
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 # Compiler flags
@@ -49,6 +53,7 @@ add_executable(test_robots_ua_priority
     src/config_loader.cpp
     src/text_extractor.cpp
     src/rocksdb_manager.cpp
+    src/raw_socket_http.cpp
 )
 
 target_link_libraries(test_robots_ua_priority
@@ -56,6 +61,8 @@ target_link_libraries(test_robots_ua_priority
     CURL::libcurl
     rocksdb
     gumbo
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 if(MSVC)
@@ -73,6 +80,7 @@ add_executable(test_robots_integration
     src/config_loader.cpp
     src/text_extractor.cpp
     src/rocksdb_manager.cpp
+    src/raw_socket_http.cpp
 )
 
 target_link_libraries(test_robots_integration
@@ -80,6 +88,8 @@ target_link_libraries(test_robots_integration
     CURL::libcurl
     rocksdb
     gumbo
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 if(MSVC)
@@ -96,6 +106,7 @@ add_executable(test_robots_wildcard
     src/config_loader.cpp
     src/text_extractor.cpp
     src/rocksdb_manager.cpp
+    src/raw_socket_http.cpp
 )
 
 target_link_libraries(test_robots_wildcard
@@ -103,6 +114,8 @@ target_link_libraries(test_robots_wildcard
     CURL::libcurl
     rocksdb
     gumbo
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 if(MSVC)
@@ -121,6 +134,8 @@ add_executable(test_rocksdb
 target_link_libraries(test_rocksdb
     PRIVATE
     rocksdb
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 if(MSVC)
@@ -139,6 +154,8 @@ add_executable(test_text_extractor
 target_link_libraries(test_text_extractor
     PRIVATE
     gumbo
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 if(MSVC)
