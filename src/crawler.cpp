@@ -31,6 +31,9 @@ WebCrawler::WebCrawler(const std::string& user_agent)
       http10_requests_(0), total_bytes_downloaded_(0), 
       total_duration_ms_(0), last_request_duration_ms_(0), latency_ema_ms_(0.0),
       consecutive_failures_(0), consecutive_successes_(0), last_delay_ms_(0),
+      db_manager_(std::make_unique<RocksDBManager>("rocksdb_queue")),
+      text_extractor_(std::make_unique<TextExtractor>()),
+      db_path_("rocksdb_queue"),
       enable_periodic_stats_(false), stats_thread_running_(false), 
       enable_deduplication_(false) {
     curl_global_init(CURL_GLOBAL_DEFAULT);
