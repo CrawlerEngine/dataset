@@ -179,7 +179,7 @@ bool WebCrawler::check_meta_tags(const std::string& html) {
 
 
 
-std::string WebCrawler::normalize_user_agent(const std::string& agent) {
+std::string WebCrawler::normalize_user_agent(const std::string& agent) const {
     // Keep asterisk as-is for wildcard matching
     if (agent == "*") return agent;
     
