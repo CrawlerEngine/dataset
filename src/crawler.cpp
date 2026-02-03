@@ -931,6 +931,8 @@ DataRecord WebCrawler::fetch(const std::string& url) {
 
 std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& urls) {
     std::vector<DataRecord> records;
+    constexpr int kInitialPriority = 0;
+    constexpr int kDiscoveredPriority = 1;
     
     // Clear memory caches
     visited_urls_memory_.clear();
@@ -951,7 +953,7 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
     
     // Enqueue initial URLs to RocksDB
     for (const auto& url : urls) {
-        db_manager_->enqueue_url(normalize_url(url));
+        db_manager_->enqueue_url(normalize_url(url), kInitialPriority);
     }
     
     // Log start of crawling
@@ -1004,6 +1006,7 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
                     // Store link graph edges
                     for (const auto& link : new_links) {
                         db_manager_->add_link_edge(normalized, link);
+                        report_link_edge(normalized, link);
                     }
                     
                     // Filter out already visited links and enqueue to RocksDB
@@ -1011,7 +1014,7 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
                     for (const auto& link : new_links) {
                         if (visited_urls_memory_.find(link) == visited_urls_memory_.end() && !db_manager_->is_visited(link)) {
                             unvisited_links.push_back(link);
-                            db_manager_->enqueue_url(link);  // Persist to RocksDB
+                            db_manager_->enqueue_url(link, kDiscoveredPriority);  // Persist to RocksDB
                         }
                     }
                     

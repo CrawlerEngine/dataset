@@ -9,6 +9,7 @@
 #include <vector>
 #include <atomic>
 #include <csignal>
+#include <filesystem>
 
 namespace {
 
@@ -110,6 +111,17 @@ int main(int argc, char* argv[]) {
 
         // Write to files
         ParquetDatasetWriter writer;
+
+        if (!config.output_dir.empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(config.output_dir, ec);
+            if (ec) {
+                std::ostringstream warn_msg;
+                warn_msg << "Failed to create output directory " << config.output_dir
+                         << ": " << ec.message();
+                log_warn(warn_msg.str());
+            }
+        }
         
         if (config.output_format == "json" || config.output_format == "both") {
             std::string json_path = config.output_dir + "/dataset.json";
