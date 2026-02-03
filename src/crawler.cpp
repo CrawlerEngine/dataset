@@ -24,18 +24,48 @@ static size_t write_callback(void* contents, size_t size, size_t nmemb, std::str
 }
 
 WebCrawler::WebCrawler(const std::string& user_agent)
-    : user_agent_(user_agent), timeout_(30), respect_robots_txt_(true),
-      respect_meta_tags_(true), max_file_size_bytes_(100 * 1024 * 1024),  // 100 MB default
-      blocked_by_robots_(0), blocked_by_noindex_(0), skipped_by_size_(0),
-      sitemaps_found_(0), duplicates_detected_(0), http2_requests_(0), http11_requests_(0),
-      http10_requests_(0), total_bytes_downloaded_(0), 
-      total_duration_ms_(0), last_request_duration_ms_(0), latency_ema_ms_(0.0),
-      consecutive_failures_(0), consecutive_successes_(0), last_delay_ms_(0),
+    : user_agent_(user_agent),
+      http_config_(),
+      timeout_(30),
+      headers_(),
+      respect_robots_txt_(true),
+      respect_meta_tags_(true),
+      max_file_size_bytes_(100 * 1024 * 1024),  // 100 MB default
       db_manager_(std::make_unique<RocksDBManager>("rocksdb_queue")),
       text_extractor_(std::make_unique<TextExtractor>()),
       db_path_("rocksdb_queue"),
-      enable_periodic_stats_(false), stats_thread_running_(false), 
-      enable_deduplication_(false) {
+      blocked_by_robots_(0),
+      blocked_by_noindex_(0),
+      skipped_by_size_(0),
+      sitemaps_found_(0),
+      duplicates_detected_(0),
+      http2_requests_(0),
+      http11_requests_(0),
+      http10_requests_(0),
+      total_bytes_downloaded_(0),
+      total_duration_ms_(0),
+      last_request_duration_ms_(0),
+      latency_ema_ms_(0.0),
+      consecutive_failures_(0),
+      consecutive_successes_(0),
+      last_delay_ms_(0),
+      last_request_time_(),
+      current_domain_(),
+      robots_cache_(),
+      robots_sitemaps_cache_(),
+      robots_rules_cache_(),
+      robots_crawl_delay_cache_(),
+      robots_cache_time_(),
+      robots_sitemaps_cache_time_(),
+      crawl_start_time_(),
+      visited_urls_memory_(),
+      enable_periodic_stats_(false),
+      stats_thread_running_(false),
+      stats_reporter_thread_(),
+      stats_mutex_(),
+      enable_deduplication_(false),
+      content_hashes_(),
+      dedup_mutex_() {
     curl_global_init(CURL_GLOBAL_DEFAULT);
     crawl_start_time_ = std::chrono::steady_clock::now();
     last_request_time_ = crawl_start_time_;
@@ -162,7 +192,7 @@ std::string WebCrawler::normalize_user_agent(const std::string& agent) {
     return agent;
 }
 
-bool WebCrawler::matches_user_agent(const std::string& rule_agent, const std::string& crawler_agent) {
+bool WebCrawler::matches_user_agent(const std::string& rule_agent, const std::string& crawler_agent) const {
     // Wildcard match (check before normalization)
     if (rule_agent == "*") return true;
     

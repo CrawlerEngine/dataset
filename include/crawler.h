@@ -126,7 +126,7 @@ public:
     /**
      * Public methods for testing robots.txt User-Agent matching
      */
-    bool matches_user_agent(const std::string& rule_agent, const std::string& crawler_agent);
+    bool matches_user_agent(const std::string& rule_agent, const std::string& crawler_agent) const;
     std::string normalize_user_agent(const std::string& agent);
     std::vector<RobotRule> parse_robots_txt(const std::string& host, const std::string& robots_content);
 
