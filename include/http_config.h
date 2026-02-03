@@ -17,6 +17,20 @@ struct HTTPConfig {
     bool verify_ssl_host = false;
     int tcp_keepalive_idle = 120;  // Seconds
     int tcp_keepalive_interval = 60; // Seconds
+    bool use_raw_sockets = true;   // Use raw-socket HTTP/1.1 fetch for http://
+    int max_retries = 2;           // Auto-retries for fetch failures
+    int retry_backoff_ms = 200;    // Base backoff between retries
+    bool enable_adaptive_delay = true; // Enable adaptive delay between requests
+    int min_delay_ms = 50;         // Minimum adaptive delay
+    int max_delay_ms = 2000;       // Maximum adaptive delay
+    int base_delay_ms = 150;       // Baseline delay for low-latency responses
+    double latency_ema_alpha = 0.2; // EMA factor for latency smoothing
+    int failure_backoff_ms = 250;  // Extra backoff per failure streak
+    int jitter_pct = 10;           // Random jitter percentage applied to delay
+    double max_qps = 0.0;          // Global QPS cap (0 = disabled)
+    int robots_cache_ttl_seconds = 3600;  // TTL for robots cache
+    int sitemaps_cache_ttl_seconds = 3600; // TTL for sitemap cache
+    int max_redirects = 5;         // Max redirects to follow in raw socket fetch
 };
 
 enum class HTTPVersion {
