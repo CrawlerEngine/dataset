@@ -19,10 +19,14 @@ public:
     bool init();
     
     // Queue operations
-    bool enqueue_url(const std::string& url);
+    bool enqueue_url(const std::string& url, int priority = 0);
     std::string dequeue_url();
     bool has_queued_urls();
     int get_queue_size();
+
+    // Link graph operations
+    bool add_link_edge(const std::string& from_url, const std::string& to_url);
+    std::vector<std::string> get_outgoing_links(const std::string& from_url);
     
     // Visited links operations
     bool mark_visited(const std::string& url);
@@ -46,9 +50,12 @@ private:
     rocksdb::DB* db_;
     std::unique_ptr<rocksdb::Options> options_;
     
-    std::string make_queue_key(int index) const;
+    std::string make_priority_queue_key(int priority, int index) const;
+    std::string make_priority_tail_key(int priority) const;
     std::string make_visited_key(const std::string& url) const;
     std::string make_cache_key(const std::string& url) const;
+    std::string make_link_edge_key(const std::string& from_url, const std::string& to_url) const;
+    std::string make_link_prefix(const std::string& from_url) const;
 };
 
 #endif // ROCKSDB_MANAGER_H

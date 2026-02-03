@@ -17,6 +17,9 @@ struct HTTPConfig {
     bool verify_ssl_host = false;
     int tcp_keepalive_idle = 120;  // Seconds
     int tcp_keepalive_interval = 60; // Seconds
+    bool use_raw_sockets = true;   // Use raw-socket HTTP/1.1 fetch for http://
+    int max_retries = 2;           // Auto-retries for fetch failures
+    int retry_backoff_ms = 200;    // Base backoff between retries
 };
 
 enum class HTTPVersion {

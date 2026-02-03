@@ -1,5 +1,6 @@
 #include "crawler.h"
 #include "logger.h"
+#include "raw_socket_http.h"
 #include <curl/curl.h>
 #include <iconv.h>
 #include <regex>
@@ -479,114 +480,169 @@ bool WebCrawler::check_robots_txt(const std::string& url) {
 
 std::string WebCrawler::fetch_html(const std::string& url, int& status_code) {
     auto request_start = std::chrono::steady_clock::now();
-    
-    CURL* curl = curl_easy_init();
-    if (!curl) {
-        std::cerr << "Failed to initialize CURL" << std::endl;
-        status_code = 0;
-        return "";
-    }
 
     std::string response;
     std::string content_type;
-    struct curl_slist* headers = nullptr;
-
-    // Add default headers
-    headers = curl_slist_append(headers, "User-Agent: DatasetCrawler/1.0");
-    headers = curl_slist_append(headers, "Accept: text/html,application/xhtml+xml");
-    headers = curl_slist_append(headers, "Accept-Language: en-US,en;q=0.9");
-    headers = curl_slist_append(headers, "Accept-Encoding: gzip, deflate, br");
-
-    // Add custom headers
-    for (const auto& [key, value] : headers_) {
-        std::string header = key + ": " + value;
-        headers = curl_slist_append(headers, header.c_str());
+    std::string scheme;
+    auto scheme_pos = url.find("://");
+    if (scheme_pos != std::string::npos) {
+        scheme = url.substr(0, scheme_pos);
     }
 
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip, deflate, br");
-    
-    // Enable HTTP/2 support (automatically falls back to HTTP/1.1 if HTTP/2 not available)
-    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0);
-    
-    // SSL/TLS configuration for BoringSSL
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);  // Accept any cert for now
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);  // Don't verify hostname
-    
-    // Enable connection reuse
-    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-    curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 120L);
-    curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 60L);
+    if (http_config_.use_raw_sockets && scheme == "http") {
+        RawSocketHttpConfig raw_config;
+        raw_config.timeout = std::chrono::seconds(timeout_);
+        raw_config.retry.max_retries = http_config_.max_retries;
+        raw_config.retry.retry_backoff_ms = http_config_.retry_backoff_ms;
 
-    CURLcode res = curl_easy_perform(curl);
-    
-    if (res != CURLE_OK) {
-        std::string error_msg = std::string(curl_easy_strerror(res));
-        // Check if it's a URL parsing error
-        if (error_msg.find("Unsupported") != std::string::npos ||
-            error_msg.find("Invalid") != std::string::npos ||
-            error_msg.find("malformed") != std::string::npos) {
-            log_warn("Failed to parse URL: " + error_msg);
-        } else {
-            log_error("CURL error for " + url + ": " + error_msg);
+        std::map<std::string, std::string> request_headers;
+        request_headers["Accept"] = "text/html,application/xhtml+xml";
+        request_headers["Accept-Language"] = "en-US,en;q=0.9";
+        request_headers["Accept-Encoding"] = "identity";
+        for (const auto& [key, value] : headers_) {
+            request_headers[key] = value;
         }
-        status_code = 0;
-    } else {
-        long http_code = 0;
-        char* final_url = nullptr;
-        char* content_type_ptr = nullptr;
-        long http_version = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-        curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &final_url);
-        curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &content_type_ptr);
-        curl_easy_getinfo(curl, CURLINFO_HTTP_VERSION, &http_version);
-        
-        // Store Content-Type header
-        if (content_type_ptr) {
-            content_type = std::string(content_type_ptr);
-        }
-        
-        // Log HTTP version used and track statistics
-        std::string http_version_str;
-        switch (http_version) {
-            case CURL_HTTP_VERSION_1_0:
-                http_version_str = "HTTP/1.0";
+
+        RawSocketHttpClient client(raw_config);
+        RawHttpResponse raw_response = client.fetch(url, request_headers);
+        response = raw_response.body;
+        content_type = raw_response.content_type;
+        status_code = raw_response.status_code;
+
+        switch (raw_response.http_version) {
+            case HTTPVersion::HTTP_1_0:
                 http10_requests_++;
                 break;
-            case CURL_HTTP_VERSION_1_1:
-                http_version_str = "HTTP/1.1";
+            case HTTPVersion::HTTP_1_1:
                 http11_requests_++;
                 break;
-            case CURL_HTTP_VERSION_2_0:
-                http_version_str = "HTTP/2";
+            case HTTPVersion::HTTP_2_0:
                 http2_requests_++;
                 break;
             default:
-                http_version_str = "HTTP/?.?";
+                break;
         }
-        
-        // Log redirect if URL changed
-        if (final_url && final_url != url) {
-            std::string final_url_str(final_url);
-            if (final_url_str != url) {
-                std::ostringstream redirect_msg;
-                redirect_msg << "The start URL \"" << url << "\" has been redirected to \"" 
-                            << final_url_str << "\" [" << http_version_str << "]";
-                log_warn(redirect_msg.str());
+
+        if (!raw_response.success) {
+            log_error("Raw socket error for " + url + ": " + raw_response.error_message);
+        }
+    } else {
+        int attempts = std::max(1, http_config_.max_retries + 1);
+        for (int attempt = 0; attempt < attempts; ++attempt) {
+            CURL* curl = curl_easy_init();
+            if (!curl) {
+                std::cerr << "Failed to initialize CURL" << std::endl;
+                status_code = 0;
+                return "";
+            }
+
+            response.clear();
+            content_type.clear();
+            struct curl_slist* headers = nullptr;
+
+            // Add default headers
+            headers = curl_slist_append(headers, "User-Agent: DatasetCrawler/1.0");
+            headers = curl_slist_append(headers, "Accept: text/html,application/xhtml+xml");
+            headers = curl_slist_append(headers, "Accept-Language: en-US,en;q=0.9");
+            headers = curl_slist_append(headers, "Accept-Encoding: gzip, deflate, br");
+
+            // Add custom headers
+            for (const auto& [key, value] : headers_) {
+                std::string header = key + ": " + value;
+                headers = curl_slist_append(headers, header.c_str());
+            }
+
+            curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_);
+            curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+            curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip, deflate, br");
+
+            // Enable HTTP/2 support (automatically falls back to HTTP/1.1 if HTTP/2 not available)
+            curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0);
+
+            // SSL/TLS configuration for BoringSSL
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);  // Accept any cert for now
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);  // Don't verify hostname
+
+            // Enable connection reuse
+            curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+            curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 120L);
+            curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 60L);
+
+            CURLcode res = curl_easy_perform(curl);
+
+            if (res != CURLE_OK) {
+                std::string error_msg = std::string(curl_easy_strerror(res));
+                if (error_msg.find("Unsupported") != std::string::npos ||
+                    error_msg.find("Invalid") != std::string::npos ||
+                    error_msg.find("malformed") != std::string::npos) {
+                    log_warn("Failed to parse URL: " + error_msg);
+                } else {
+                    log_error("CURL error for " + url + ": " + error_msg);
+                }
+                status_code = 0;
+            } else {
+                long http_code = 0;
+                char* final_url = nullptr;
+                char* content_type_ptr = nullptr;
+                long http_version = 0;
+                curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+                curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &final_url);
+                curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &content_type_ptr);
+                curl_easy_getinfo(curl, CURLINFO_HTTP_VERSION, &http_version);
+
+                if (content_type_ptr) {
+                    content_type = std::string(content_type_ptr);
+                }
+
+                std::string http_version_str;
+                switch (http_version) {
+                    case CURL_HTTP_VERSION_1_0:
+                        http_version_str = "HTTP/1.0";
+                        http10_requests_++;
+                        break;
+                    case CURL_HTTP_VERSION_1_1:
+                        http_version_str = "HTTP/1.1";
+                        http11_requests_++;
+                        break;
+                    case CURL_HTTP_VERSION_2_0:
+                        http_version_str = "HTTP/2";
+                        http2_requests_++;
+                        break;
+                    default:
+                        http_version_str = "HTTP/?.?";
+                }
+
+                if (final_url && final_url != url) {
+                    std::string final_url_str(final_url);
+                    if (final_url_str != url) {
+                        std::ostringstream redirect_msg;
+                        redirect_msg << "The start URL \"" << url << "\" has been redirected to \""
+                                    << final_url_str << "\" [" << http_version_str << "]";
+                        log_warn(redirect_msg.str());
+                    }
+                }
+
+                status_code = static_cast<int>(http_code);
+            }
+
+            curl_slist_free_all(headers);
+            curl_easy_cleanup(curl);
+
+            if (status_code > 0) {
+                break;
+            }
+
+            if (attempt + 1 < attempts) {
+                int backoff = http_config_.retry_backoff_ms * (attempt + 1);
+                std::this_thread::sleep_for(std::chrono::milliseconds(backoff));
             }
         }
-        
-        status_code = static_cast<int>(http_code);
     }
-
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
     
     // Detect and convert encoding
     std::string encoding = detect_encoding(response, content_type);
@@ -695,6 +751,8 @@ DataRecord WebCrawler::fetch(const std::string& url) {
 
 std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& urls) {
     std::vector<DataRecord> records;
+    constexpr int kInitialPriority = 0;
+    constexpr int kDiscoveredPriority = 1;
     
     // Clear memory caches
     visited_urls_memory_.clear();
@@ -707,7 +765,7 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
     
     // Enqueue initial URLs to RocksDB
     for (const auto& url : urls) {
-        db_manager_->enqueue_url(normalize_url(url));
+        db_manager_->enqueue_url(normalize_url(url), kInitialPriority);
     }
     
     // Log start of crawling
@@ -751,13 +809,18 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
                     
                     // Extract links from the page
                     std::vector<std::string> new_links = extract_links_from_html(record.content, url);
+
+                    // Store link graph edges
+                    for (const auto& link : new_links) {
+                        db_manager_->add_link_edge(normalized, link);
+                    }
                     
                     // Filter out already visited links and enqueue to RocksDB
                     std::vector<std::string> unvisited_links;
                     for (const auto& link : new_links) {
                         if (visited_urls_memory_.find(link) == visited_urls_memory_.end() && !db_manager_->is_visited(link)) {
                             unvisited_links.push_back(link);
-                            db_manager_->enqueue_url(link);  // Persist to RocksDB
+                            db_manager_->enqueue_url(link, kDiscoveredPriority);  // Persist to RocksDB
                         }
                     }
                     
