@@ -178,6 +178,11 @@ private:
     long total_bytes_downloaded_;
     long total_duration_ms_;
     std::vector<long> request_durations_;  // For calculating avg
+    long last_request_duration_ms_;
+    double latency_ema_ms_;
+    int consecutive_failures_;
+    int consecutive_successes_;
+    int last_delay_ms_;
     
     std::map<std::string, bool> robots_cache_;
     std::map<std::string, std::vector<std::string>> robots_sitemaps_cache_;
@@ -221,6 +226,7 @@ private:
     // Encoding detection and conversion
     std::string detect_encoding(const std::string& content, const std::string& content_type);
     std::string convert_to_utf8(const std::string& content, const std::string& from_encoding);
+    void apply_adaptive_delay(int status_code);
 };
 
 #endif
