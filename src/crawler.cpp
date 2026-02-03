@@ -961,16 +961,12 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
     constexpr int kDiscoveredPriority = 1;
     
     // Clear memory caches
-    visited_urls_memory_.clear();
-    
-    // Initialize database for persistent queue storage
-    if (!db_manager_) {
-        log_error("RocksDBManager not initialized");
-        return records;
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        visited_urls_memory_.clear();
     }
-    
-    if (!db_manager_->init()) {
-        log_error("Failed to initialize RocksDB for queue management");
+
+    if (!ensure_db_initialized()) {
         return records;
     }
     
@@ -979,7 +975,7 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
     
     // Enqueue initial URLs to RocksDB
     for (const auto& url : urls) {
-        db_manager_->enqueue_url(normalize_url(url), kInitialPriority);
+        enqueue_url(url, kInitialPriority);
     }
     
     // Log start of crawling
