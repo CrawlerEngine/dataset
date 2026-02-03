@@ -27,7 +27,10 @@ WebCrawler::WebCrawler(const std::string& user_agent)
       sitemaps_found_(0), duplicates_detected_(0), http2_requests_(0), http11_requests_(0),
       http10_requests_(0), total_bytes_downloaded_(0), 
       total_duration_ms_(0), enable_periodic_stats_(false), stats_thread_running_(false), 
-      enable_deduplication_(false) {
+      enable_deduplication_(false),
+      db_manager_(std::make_unique<RocksDBManager>("rocksdb_queue")),
+      db_path_("rocksdb_queue"),
+text_extractor_(std::make_unique<TextExtractor>()) {
     curl_global_init(CURL_GLOBAL_DEFAULT);
     crawl_start_time_ = std::chrono::steady_clock::now();
     http_config_.enable_http2 = true;  // Enable HTTP/2 by default
@@ -700,10 +703,18 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
     visited_urls_memory_.clear();
     
     // Initialize database for persistent queue storage
-    if (!db_manager_ || !db_manager_->init()) {
+    if (!db_manager_) {
+        log_error("RocksDBManager not initialized");
+        return records;
+    }
+    
+    if (!db_manager_->init()) {
         log_error("Failed to initialize RocksDB for queue management");
         return records;
     }
+    
+    std::cout << "INFO: RocksDB initialized successfully" << std::endl;
+    log_info("RocksDB initialized successfully");
     
     // Enqueue initial URLs to RocksDB
     for (const auto& url : urls) {
