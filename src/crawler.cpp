@@ -938,10 +938,18 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
     visited_urls_memory_.clear();
     
     // Initialize database for persistent queue storage
-    if (!db_manager_ || !db_manager_->init()) {
+    if (!db_manager_) {
+        log_error("RocksDBManager not initialized");
+        return records;
+    }
+    
+    if (!db_manager_->init()) {
         log_error("Failed to initialize RocksDB for queue management");
         return records;
     }
+    
+    std::cout << "INFO: RocksDB initialized successfully" << std::endl;
+    log_info("RocksDB initialized successfully");
     
     // Enqueue initial URLs to RocksDB
     for (const auto& url : urls) {
