@@ -71,6 +71,116 @@ std::string to_lower(std::string input) {
     return input;
 }
 
+std::string trim(const std::string& value) {
+    size_t start = value.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) {
+        return "";
+    }
+    size_t end = value.find_last_not_of(" \t\r\n");
+    return value.substr(start, end - start + 1);
+}
+
+struct ParsedHeaders {
+    size_t header_end = std::string::npos;
+    bool chunked = false;
+    bool has_content_length = false;
+    size_t content_length = 0;
+    std::string location;
+    std::string content_type;
+};
+
+ParsedHeaders parse_headers(const std::string& buffer) {
+    ParsedHeaders headers;
+    headers.header_end = buffer.find("\r\n\r\n");
+    if (headers.header_end == std::string::npos) {
+        return headers;
+    }
+
+    std::string header_block = buffer.substr(0, headers.header_end);
+    std::istringstream header_stream(header_block);
+    std::string status_line;
+    std::getline(header_stream, status_line);
+
+    std::string header_line;
+    while (std::getline(header_stream, header_line)) {
+        if (!header_line.empty() && header_line.back() == '\r') {
+            header_line.pop_back();
+        }
+        auto delimiter_pos = header_line.find(':');
+        if (delimiter_pos == std::string::npos) {
+            continue;
+        }
+        std::string key = to_lower(trim(header_line.substr(0, delimiter_pos)));
+        std::string value = trim(header_line.substr(delimiter_pos + 1));
+        if (key == "content-type") {
+            headers.content_type = value;
+        } else if (key == "content-length") {
+            try {
+                headers.has_content_length = true;
+                headers.content_length = static_cast<size_t>(std::stoul(value));
+            } catch (const std::exception&) {
+                headers.has_content_length = false;
+                headers.content_length = 0;
+            }
+        } else if (key == "transfer-encoding" && to_lower(value).find("chunked") != std::string::npos) {
+            headers.chunked = true;
+        } else if (key == "location") {
+            headers.location = value;
+        }
+    }
+
+    return headers;
+}
+
+bool decode_chunked_body(const std::string& input, std::string& output, bool& complete) {
+    complete = false;
+    size_t pos = 0;
+    output.clear();
+    while (true) {
+        size_t line_end = input.find("\r\n", pos);
+        if (line_end == std::string::npos) {
+            return false;
+        }
+        std::string size_str = input.substr(pos, line_end - pos);
+        size_t semicolon = size_str.find(';');
+        if (semicolon != std::string::npos) {
+            size_str = size_str.substr(0, semicolon);
+        }
+        size_t chunk_size = 0;
+        std::istringstream size_stream(size_str);
+        size_stream >> std::hex >> chunk_size;
+        if (size_stream.fail()) {
+            return false;
+        }
+        pos = line_end + 2;
+        if (chunk_size == 0) {
+            complete = true;
+            return true;
+        }
+        if (pos + chunk_size + 2 > input.size()) {
+            return false;
+        }
+        output.append(input, pos, chunk_size);
+        pos += chunk_size + 2;
+    }
+}
+
+std::string resolve_redirect(const ParsedUrl& base, const std::string& location) {
+    if (location.empty()) {
+        return "";
+    }
+    if (location.find("http://") == 0 || location.find("https://") == 0) {
+        return location;
+    }
+    if (location.rfind("//", 0) == 0) {
+        return base.scheme + ":" + location;
+    }
+    if (!location.empty() && location[0] == '/') {
+        return base.scheme + "://" + base.host + location;
+    }
+    return base.scheme + "://" + base.host + "/" + location;
+}
+
 void set_socket_timeouts(int socket_fd, std::chrono::seconds timeout) {
     struct timeval tv {};
     tv.tv_sec = static_cast<long>(timeout.count());
@@ -130,15 +240,17 @@ int connect_with_timeout(struct addrinfo* addr_info, std::chrono::seconds timeou
 
 RawHttpResponse parse_http_response(const std::string& buffer, const std::string& url) {
     RawHttpResponse response;
-    auto header_end = buffer.find("\r\n\r\n");
-    if (header_end == std::string::npos) {
+    ParsedHeaders headers = parse_headers(buffer);
+    if (headers.header_end == std::string::npos) {
         response.error_message = "invalid HTTP response";
         return response;
     }
 
-    std::string header_block = buffer.substr(0, header_end);
-    response.body = buffer.substr(header_end + 4);
+    std::string header_block = buffer.substr(0, headers.header_end);
+    std::string body = buffer.substr(headers.header_end + 4);
     response.final_url = url;
+    response.content_type = headers.content_type;
+    response.location = headers.location;
 
     std::istringstream header_stream(header_block);
     std::string status_line;
@@ -152,21 +264,19 @@ RawHttpResponse parse_http_response(const std::string& buffer, const std::string
         status_parser >> http_version >> response.status_code;
     }
 
-    std::string header_line;
-    while (std::getline(header_stream, header_line)) {
-        if (!header_line.empty() && header_line.back() == '\r') {
-            header_line.pop_back();
+    if (headers.chunked) {
+        bool complete = false;
+        std::string decoded;
+        if (decode_chunked_body(body, decoded, complete) && complete) {
+            response.body = decoded;
+        } else {
+            response.error_message = "incomplete chunked response";
+            response.body = body;
         }
-        auto delimiter_pos = header_line.find(':');
-        if (delimiter_pos == std::string::npos) {
-            continue;
-        }
-        std::string key = to_lower(header_line.substr(0, delimiter_pos));
-        std::string value = header_line.substr(delimiter_pos + 1);
-        value.erase(0, value.find_first_not_of(" \t"));
-        if (key == "content-type") {
-            response.content_type = value;
-        }
+    } else if (headers.has_content_length) {
+        response.body = body.substr(0, headers.content_length);
+    } else {
+        response.body = body;
     }
 
     response.success = response.status_code > 0;
@@ -348,6 +458,37 @@ private:
         }
 
         response_buffer_.append(buffer, static_cast<size_t>(received));
+        if (!headers_parsed_) {
+            ParsedHeaders headers = parse_headers(response_buffer_);
+            if (headers.header_end != std::string::npos) {
+                headers_parsed_ = true;
+                header_end_pos_ = headers.header_end;
+                content_length_ = headers.content_length;
+                has_content_length_ = headers.has_content_length;
+                chunked_ = headers.chunked;
+            }
+        }
+
+        if (headers_parsed_) {
+            std::string body = response_buffer_.substr(header_end_pos_ + 4);
+            if (chunked_) {
+                bool complete = false;
+                std::string decoded;
+                if (decode_chunked_body(body, decoded, complete) && complete) {
+                    response_buffer_ = response_buffer_.substr(0, header_end_pos_ + 4) + decoded;
+                    finalize_response();
+                    complete_ = true;
+                    return false;
+                }
+            } else if (has_content_length_) {
+                if (body.size() >= content_length_) {
+                    response_buffer_.resize(header_end_pos_ + 4 + content_length_);
+                    finalize_response();
+                    complete_ = true;
+                    return false;
+                }
+            }
+        }
         return true;
     }
 
@@ -355,7 +496,7 @@ private:
         std::ostringstream request_stream;
         request_stream << "GET " << parsed_.path << " HTTP/1.1\r\n";
         request_stream << "Host: " << parsed_.host << "\r\n";
-        request_stream << "Connection: close\r\n";
+        request_stream << "Connection: keep-alive\r\n";
         request_stream << "User-Agent: DatasetCrawler/1.0\r\n";
         for (const auto& header : headers_) {
             request_stream << header.first << ": " << header.second << "\r\n";
@@ -381,6 +522,11 @@ private:
     size_t request_offset_ = 0;
     std::string response_buffer_;
     RawHttpResponse response_;
+    bool headers_parsed_ = false;
+    size_t header_end_pos_ = 0;
+    size_t content_length_ = 0;
+    bool has_content_length_ = false;
+    bool chunked_ = false;
 };
 
 } // namespace
@@ -413,8 +559,11 @@ RawHttpResponse RawSocketHttpClient::fetch(const std::string& url,
                                            const std::map<std::string, std::string>& headers) {
     RawHttpResponse response;
     ParsedUrl parsed = parse_url(url);
+    std::string current_url = url;
+    int attempts = std::max(1, config_.retry.max_retries + 1);
+
     if (parsed.valid && parsed.scheme == "https") {
-        int attempts = std::max(1, config_.retry.max_retries + 1);
+        int redirects_remaining = std::max(0, config_.max_redirects);
         for (int attempt = 0; attempt < attempts; ++attempt) {
             std::string error;
             struct addrinfo hints {};
@@ -422,6 +571,7 @@ RawHttpResponse RawSocketHttpClient::fetch(const std::string& url,
             hints.ai_socktype = SOCK_STREAM;
 
             struct addrinfo* addr_info = nullptr;
+            parsed = parse_url(current_url);
             const std::string port_str = std::to_string(parsed.port);
             int result = getaddrinfo(parsed.host.c_str(), port_str.c_str(), &hints, &addr_info);
             if (result != 0) {
@@ -467,7 +617,7 @@ RawHttpResponse RawSocketHttpClient::fetch(const std::string& url,
             std::ostringstream request_stream;
             request_stream << "GET " << parsed.path << " HTTP/1.1\r\n";
             request_stream << "Host: " << parsed.host << "\r\n";
-            request_stream << "Connection: close\r\n";
+            request_stream << "Connection: keep-alive\r\n";
             request_stream << "User-Agent: DatasetCrawler/1.0\r\n";
             for (const auto& header : headers) {
                 request_stream << header.first << ": " << header.second << "\r\n";
@@ -494,7 +644,7 @@ RawHttpResponse RawSocketHttpClient::fetch(const std::string& url,
                     response_buffer.append(buffer, static_cast<size_t>(read_bytes));
                 }
                 if (!response_buffer.empty()) {
-                    response = parse_http_response(response_buffer, url);
+                    response = parse_http_response(response_buffer, current_url);
                 } else if (response.error_message.empty()) {
                     response.error_message = "empty HTTPS response";
                 }
@@ -507,6 +657,16 @@ RawHttpResponse RawSocketHttpClient::fetch(const std::string& url,
             freeaddrinfo(addr_info);
 
             if (response.success) {
+                if (response.status_code == 301 || response.status_code == 302 ||
+                    response.status_code == 303 || response.status_code == 307 ||
+                    response.status_code == 308) {
+                    std::string next_url = resolve_redirect(parsed, response.location);
+                    if (!next_url.empty() && redirects_remaining > 0) {
+                        current_url = next_url;
+                        redirects_remaining--;
+                        continue;
+                    }
+                }
                 return response;
             }
 
@@ -519,15 +679,26 @@ RawHttpResponse RawSocketHttpClient::fetch(const std::string& url,
         return response;
     }
 
-    int attempts = std::max(1, config_.retry.max_retries + 1);
+    int redirects_remaining = std::max(0, config_.max_redirects);
     for (int attempt = 0; attempt < attempts; ++attempt) {
-        auto task = std::make_shared<HttpFetchCoroutine>(url, headers, config_.timeout);
+        auto task = std::make_shared<HttpFetchCoroutine>(current_url, headers, config_.timeout);
         RoundRobinScheduler scheduler;
         scheduler.add_task(task);
         scheduler.run();
 
         response = task->response();
         if (response.success) {
+            if (response.status_code == 301 || response.status_code == 302 ||
+                response.status_code == 303 || response.status_code == 307 ||
+                response.status_code == 308) {
+                ParsedUrl current_parsed = parse_url(current_url);
+                std::string next_url = resolve_redirect(current_parsed, response.location);
+                if (!next_url.empty() && redirects_remaining > 0) {
+                    current_url = next_url;
+                    redirects_remaining--;
+                    continue;
+                }
+            }
             return response;
         }
 

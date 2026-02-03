@@ -27,6 +27,10 @@ struct HTTPConfig {
     double latency_ema_alpha = 0.2; // EMA factor for latency smoothing
     int failure_backoff_ms = 250;  // Extra backoff per failure streak
     int jitter_pct = 10;           // Random jitter percentage applied to delay
+    double max_qps = 0.0;          // Global QPS cap (0 = disabled)
+    int robots_cache_ttl_seconds = 3600;  // TTL for robots cache
+    int sitemaps_cache_ttl_seconds = 3600; // TTL for sitemap cache
+    int max_redirects = 5;         // Max redirects to follow in raw socket fetch
 };
 
 enum class HTTPVersion {
