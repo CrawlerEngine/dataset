@@ -12,6 +12,7 @@
 #include <mutex>
 #include <atomic>
 #include "http_config.h"
+#include "clickhouse_client.h"
 #include "rocksdb_manager.h"
 #include "text_extractor.h"
 
@@ -23,6 +24,7 @@ struct RobotRule {
     std::vector<std::string> disallows;
     std::vector<std::string> allows;
     int specificity = 0;  // Higher = more specific (exact match > pattern > wildcard)
+    double crawl_delay_seconds = -1.0;
 };
 
 struct DataRecord {
@@ -125,8 +127,8 @@ public:
     /**
      * Public methods for testing robots.txt User-Agent matching
      */
-    bool matches_user_agent(const std::string& rule_agent, const std::string& crawler_agent);
-    std::string normalize_user_agent(const std::string& agent);
+    bool matches_user_agent(const std::string& rule_agent, const std::string& crawler_agent) const;
+    std::string normalize_user_agent(const std::string& agent) const;
     std::vector<RobotRule> parse_robots_txt(const std::string& host, const std::string& robots_content);
 
     /**
@@ -151,6 +153,23 @@ public:
      */
     void set_http_config(const HTTPConfig& config);
     HTTPConfig get_http_config() const;
+
+    /**
+     * Optional headless rendering using Chrome/Chromium.
+     */
+    void set_headless_rendering(bool enable, const std::string& chrome_path, int timeout_seconds);
+
+    /**
+     * ClickHouse metrics/link graph export.
+     */
+    void set_clickhouse_config(const ClickHouseConfig& config);
+
+    /**
+     * Graceful shutdown controls.
+     */
+    void request_stop();
+    void set_stop_flag(std::atomic<bool>* stop_flag);
+    bool is_stop_requested() const;
 
 private:
     std::string user_agent_;
@@ -178,10 +197,20 @@ private:
     long total_bytes_downloaded_;
     long total_duration_ms_;
     std::vector<long> request_durations_;  // For calculating avg
+    long last_request_duration_ms_;
+    double latency_ema_ms_;
+    int consecutive_failures_;
+    int consecutive_successes_;
+    int last_delay_ms_;
+    std::chrono::steady_clock::time_point last_request_time_;
+    std::string current_domain_;
     
     std::map<std::string, bool> robots_cache_;
     std::map<std::string, std::vector<std::string>> robots_sitemaps_cache_;
     std::map<std::string, std::vector<RobotRule>> robots_rules_cache_;  // Cache parsed robots.txt rules
+    std::map<std::string, double> robots_crawl_delay_cache_;
+    std::map<std::string, std::chrono::steady_clock::time_point> robots_cache_time_;
+    std::map<std::string, std::chrono::steady_clock::time_point> robots_sitemaps_cache_time_;
     std::chrono::steady_clock::time_point crawl_start_time_;
     
     // Memory-efficient caches using STL hash containers
@@ -197,6 +226,19 @@ private:
     bool enable_deduplication_;
     std::vector<uint64_t> content_hashes_;  // Store SimHashes for deduplication
     std::mutex dedup_mutex_;
+
+    // Headless rendering
+    bool enable_headless_rendering_;
+    std::string chrome_path_;
+    int chrome_timeout_seconds_;
+
+    // ClickHouse export
+    ClickHouseConfig clickhouse_config_;
+    std::unique_ptr<ClickHouseClient> clickhouse_client_;
+
+    // Graceful shutdown
+    std::atomic<bool> stop_requested_;
+    std::atomic<bool>* external_stop_flag_;
     
     void start_stats_reporter();
     void stop_stats_reporter();
@@ -204,6 +246,15 @@ private:
     std::string format_stats_message(const CrawlerStats& stats);
 
     std::string fetch_html(const std::string& url, int& status_code);
+    std::string fetch_headless_html(const std::string& url, int& status_code, std::string& error_message);
+    bool should_stop() const;
+    void report_request_metric(const std::string& url,
+                               int status_code,
+                               long duration_ms,
+                               size_t bytes,
+                               const std::string& content_type,
+                               const std::string& error_message);
+    void report_link_edge(const std::string& from_url, const std::string& to_url);
     std::string extract_title(const std::string& html);
     bool check_robots_txt(const std::string& url);
     bool check_meta_tags(const std::string& html);
@@ -221,6 +272,9 @@ private:
     // Encoding detection and conversion
     std::string detect_encoding(const std::string& content, const std::string& content_type);
     std::string convert_to_utf8(const std::string& content, const std::string& from_encoding);
+    void apply_adaptive_delay(int status_code);
+    double get_crawl_delay_for_domain(const std::string& domain) const;
+    std::vector<std::string> parse_sitemap_index_xml(const std::string& xml_content);
 };
 
 #endif

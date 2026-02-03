@@ -1,5 +1,6 @@
 #include "crawler.h"
 #include "logger.h"
+#include "raw_socket_http.h"
 #include <curl/curl.h>
 #include <iconv.h>
 #include <regex>
@@ -13,6 +14,9 @@
 #include <cctype>
 #include <set>
 #include <cstring>
+#include <cstdlib>
+#include <cmath>
+#include <cstdio>
 
 // Callback for CURL to write data
 static size_t write_callback(void* contents, size_t size, size_t nmemb, std::string* s) {
@@ -20,16 +24,113 @@ static size_t write_callback(void* contents, size_t size, size_t nmemb, std::str
     return size * nmemb;
 }
 
+namespace {
+
+std::string escape_shell_arg(const std::string& value) {
+    std::string escaped = "'";
+    for (char c : value) {
+        if (c == '\'') {
+            escaped += "'\\''";
+        } else {
+            escaped += c;
+        }
+    }
+    escaped += "'";
+    return escaped;
+}
+
+std::string format_timestamp() {
+    auto now = std::time(nullptr);
+    auto tm = *std::localtime(&now);
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
+    return oss.str();
+}
+
+bool needs_headless_rendering(const std::string& html, int status_code) {
+    if (status_code != 200) {
+        return false;
+    }
+    if (html.empty()) {
+        return true;
+    }
+    if (html.size() < 256) {
+        return true;
+    }
+    std::string lowered = html;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lowered.find("enable javascript") != std::string::npos ||
+        lowered.find("please enable javascript") != std::string::npos ||
+        lowered.find("requires javascript") != std::string::npos) {
+        return true;
+    }
+    if (lowered.find("<noscript") != std::string::npos) {
+        return true;
+    }
+    if (lowered.find("id=\"__next\"") != std::string::npos ||
+        lowered.find("data-reactroot") != std::string::npos ||
+        lowered.find("ng-app") != std::string::npos) {
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
 WebCrawler::WebCrawler(const std::string& user_agent)
-    : user_agent_(user_agent), timeout_(30), respect_robots_txt_(true),
-      respect_meta_tags_(true), max_file_size_bytes_(100 * 1024 * 1024),  // 100 MB default
-      blocked_by_robots_(0), blocked_by_noindex_(0), skipped_by_size_(0),
-      sitemaps_found_(0), duplicates_detected_(0), http2_requests_(0), http11_requests_(0),
-      http10_requests_(0), total_bytes_downloaded_(0), 
-      total_duration_ms_(0), enable_periodic_stats_(false), stats_thread_running_(false), 
-      enable_deduplication_(false) {
+    : user_agent_(user_agent),
+      http_config_(),
+      timeout_(30),
+      headers_(),
+      respect_robots_txt_(true),
+      respect_meta_tags_(true),
+      max_file_size_bytes_(100 * 1024 * 1024),  // 100 MB default
+      db_manager_(std::make_unique<RocksDBManager>("rocksdb_queue")),
+      text_extractor_(std::make_unique<TextExtractor>()),
+      db_path_("rocksdb_queue"),
+      blocked_by_robots_(0),
+      blocked_by_noindex_(0),
+      skipped_by_size_(0),
+      sitemaps_found_(0),
+      duplicates_detected_(0),
+      http2_requests_(0),
+      http11_requests_(0),
+      http10_requests_(0),
+      total_bytes_downloaded_(0),
+      total_duration_ms_(0),
+      last_request_duration_ms_(0),
+      latency_ema_ms_(0.0),
+      consecutive_failures_(0),
+      consecutive_successes_(0),
+      last_delay_ms_(0),
+      last_request_time_(),
+      current_domain_(),
+      robots_cache_(),
+      robots_sitemaps_cache_(),
+      robots_rules_cache_(),
+      robots_crawl_delay_cache_(),
+      robots_cache_time_(),
+      robots_sitemaps_cache_time_(),
+      crawl_start_time_(),
+      visited_urls_memory_(),
+      enable_periodic_stats_(false),
+      stats_thread_running_(false),
+      stats_reporter_thread_(),
+      stats_mutex_(),
+      enable_deduplication_(false),
+      content_hashes_(),
+      dedup_mutex_(),
+      enable_headless_rendering_(false),
+      chrome_path_("chromium"),
+      chrome_timeout_seconds_(15),
+      clickhouse_config_(),
+      clickhouse_client_(nullptr),
+      stop_requested_(false),
+      external_stop_flag_(nullptr) {
     curl_global_init(CURL_GLOBAL_DEFAULT);
     crawl_start_time_ = std::chrono::steady_clock::now();
+    last_request_time_ = crawl_start_time_;
     http_config_.enable_http2 = true;  // Enable HTTP/2 by default
 }
 
@@ -56,6 +157,35 @@ void WebCrawler::set_respect_meta_tags(bool respect) {
 
 void WebCrawler::set_max_file_size(size_t size_mb) {
     max_file_size_bytes_ = size_mb * 1024 * 1024;
+}
+
+void WebCrawler::set_headless_rendering(bool enable, const std::string& chrome_path, int timeout_seconds) {
+    enable_headless_rendering_ = enable;
+    if (!chrome_path.empty()) {
+        chrome_path_ = chrome_path;
+    }
+    chrome_timeout_seconds_ = std::max(1, timeout_seconds);
+}
+
+void WebCrawler::set_clickhouse_config(const ClickHouseConfig& config) {
+    clickhouse_config_ = config;
+    if (clickhouse_config_.enabled) {
+        clickhouse_client_ = std::make_unique<ClickHouseClient>(clickhouse_config_);
+    } else {
+        clickhouse_client_.reset();
+    }
+}
+
+void WebCrawler::request_stop() {
+    stop_requested_.store(true);
+}
+
+void WebCrawler::set_stop_flag(std::atomic<bool>* stop_flag) {
+    external_stop_flag_ = stop_flag;
+}
+
+bool WebCrawler::is_stop_requested() const {
+    return should_stop();
 }
 
 int WebCrawler::get_skipped_by_size_count() const {
@@ -140,7 +270,7 @@ bool WebCrawler::check_meta_tags(const std::string& html) {
 
 
 
-std::string WebCrawler::normalize_user_agent(const std::string& agent) {
+std::string WebCrawler::normalize_user_agent(const std::string& agent) const {
     // Keep asterisk as-is for wildcard matching
     if (agent == "*") return agent;
     
@@ -153,7 +283,7 @@ std::string WebCrawler::normalize_user_agent(const std::string& agent) {
     return agent;
 }
 
-bool WebCrawler::matches_user_agent(const std::string& rule_agent, const std::string& crawler_agent) {
+bool WebCrawler::matches_user_agent(const std::string& rule_agent, const std::string& crawler_agent) const {
     // Wildcard match (check before normalization)
     if (rule_agent == "*") return true;
     
@@ -237,6 +367,19 @@ std::vector<RobotRule> WebCrawler::parse_robots_txt(const std::string& /* host *
             
             if (!path.empty()) {
                 current_rule.allows.push_back(path);
+            }
+        }
+        // Crawl-delay directive
+        else if (parsing_rule && line_lower.find("crawl-delay:") == 0) {
+            std::string value = line.substr(12);
+            value.erase(0, value.find_first_not_of(" \t"));
+            value.erase(value.find_last_not_of(" \t\r\n") + 1);
+            if (!value.empty()) {
+                try {
+                    current_rule.crawl_delay_seconds = std::stod(value);
+                } catch (const std::exception&) {
+                    // Ignore invalid crawl-delay values
+                }
             }
         }
     }
@@ -450,9 +593,15 @@ bool WebCrawler::check_robots_txt(const std::string& url) {
     size_t path_start = url.find('/', url.find("://") + 3);
     std::string path = (path_start != std::string::npos) ? url.substr(path_start) : "/";
     
-    // Check cache for parsed rules
-    if (robots_rules_cache_.find(domain) != robots_rules_cache_.end()) {
-        return is_path_allowed(robots_rules_cache_[domain], path);
+    // Check cache for parsed rules with TTL
+    auto rules_it = robots_rules_cache_.find(domain);
+    auto time_it = robots_cache_time_.find(domain);
+    if (rules_it != robots_rules_cache_.end() && time_it != robots_cache_time_.end()) {
+        auto age = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - time_it->second).count();
+        if (age <= http_config_.robots_cache_ttl_seconds) {
+            return is_path_allowed(rules_it->second, path);
+        }
     }
     
     // Fetch robots.txt
@@ -473,120 +622,195 @@ bool WebCrawler::check_robots_txt(const std::string& url) {
     
     // Cache the rules
     robots_rules_cache_[domain] = rules;
+    robots_cache_time_[domain] = std::chrono::steady_clock::now();
     
     return is_path_allowed(rules, path);
 }
 
 std::string WebCrawler::fetch_html(const std::string& url, int& status_code) {
     auto request_start = std::chrono::steady_clock::now();
-    
-    CURL* curl = curl_easy_init();
-    if (!curl) {
-        std::cerr << "Failed to initialize CURL" << std::endl;
-        status_code = 0;
-        return "";
-    }
 
     std::string response;
     std::string content_type;
-    struct curl_slist* headers = nullptr;
-
-    // Add default headers
-    headers = curl_slist_append(headers, "User-Agent: DatasetCrawler/1.0");
-    headers = curl_slist_append(headers, "Accept: text/html,application/xhtml+xml");
-    headers = curl_slist_append(headers, "Accept-Language: en-US,en;q=0.9");
-    headers = curl_slist_append(headers, "Accept-Encoding: gzip, deflate, br");
-
-    // Add custom headers
-    for (const auto& [key, value] : headers_) {
-        std::string header = key + ": " + value;
-        headers = curl_slist_append(headers, header.c_str());
+    std::string error_message;
+    std::string scheme;
+    auto scheme_pos = url.find("://");
+    if (scheme_pos != std::string::npos) {
+        scheme = url.substr(0, scheme_pos);
     }
 
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip, deflate, br");
-    
-    // Enable HTTP/2 support (automatically falls back to HTTP/1.1 if HTTP/2 not available)
-    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0);
-    
-    // SSL/TLS configuration for BoringSSL
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);  // Accept any cert for now
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);  // Don't verify hostname
-    
-    // Enable connection reuse
-    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-    curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 120L);
-    curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 60L);
+    if (response.empty() && http_config_.use_raw_sockets && (scheme == "http" || scheme == "https")) {
+        RawSocketHttpConfig raw_config;
+        raw_config.timeout = std::chrono::seconds(timeout_);
+        raw_config.retry.max_retries = http_config_.max_retries;
+        raw_config.retry.retry_backoff_ms = http_config_.retry_backoff_ms;
+        raw_config.max_redirects = http_config_.max_redirects;
 
-    CURLcode res = curl_easy_perform(curl);
-    
-    if (res != CURLE_OK) {
-        std::string error_msg = std::string(curl_easy_strerror(res));
-        // Check if it's a URL parsing error
-        if (error_msg.find("Unsupported") != std::string::npos ||
-            error_msg.find("Invalid") != std::string::npos ||
-            error_msg.find("malformed") != std::string::npos) {
-            log_warn("Failed to parse URL: " + error_msg);
-        } else {
-            log_error("CURL error for " + url + ": " + error_msg);
+        std::map<std::string, std::string> request_headers;
+        request_headers["Accept"] = "text/html,application/xhtml+xml";
+        request_headers["Accept-Language"] = "en-US,en;q=0.9";
+        request_headers["Accept-Encoding"] = "identity";
+        for (const auto& [key, value] : headers_) {
+            request_headers[key] = value;
         }
-        status_code = 0;
-    } else {
-        long http_code = 0;
-        char* final_url = nullptr;
-        char* content_type_ptr = nullptr;
-        long http_version = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-        curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &final_url);
-        curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &content_type_ptr);
-        curl_easy_getinfo(curl, CURLINFO_HTTP_VERSION, &http_version);
-        
-        // Store Content-Type header
-        if (content_type_ptr) {
-            content_type = std::string(content_type_ptr);
-        }
-        
-        // Log HTTP version used and track statistics
-        std::string http_version_str;
-        switch (http_version) {
-            case CURL_HTTP_VERSION_1_0:
-                http_version_str = "HTTP/1.0";
+
+        RawSocketHttpClient client(raw_config);
+        RawHttpResponse raw_response = client.fetch(url, request_headers);
+        response = raw_response.body;
+        content_type = raw_response.content_type;
+        status_code = raw_response.status_code;
+        error_message = raw_response.error_message;
+
+        switch (raw_response.http_version) {
+            case HTTPVersion::HTTP_1_0:
                 http10_requests_++;
                 break;
-            case CURL_HTTP_VERSION_1_1:
-                http_version_str = "HTTP/1.1";
+            case HTTPVersion::HTTP_1_1:
                 http11_requests_++;
                 break;
-            case CURL_HTTP_VERSION_2_0:
-                http_version_str = "HTTP/2";
+            case HTTPVersion::HTTP_2_0:
                 http2_requests_++;
                 break;
             default:
-                http_version_str = "HTTP/?.?";
+                break;
         }
-        
-        // Log redirect if URL changed
-        if (final_url && final_url != url) {
-            std::string final_url_str(final_url);
-            if (final_url_str != url) {
-                std::ostringstream redirect_msg;
-                redirect_msg << "The start URL \"" << url << "\" has been redirected to \"" 
-                            << final_url_str << "\" [" << http_version_str << "]";
-                log_warn(redirect_msg.str());
+
+        if (!raw_response.success) {
+            log_error("Raw socket error for " + url + ": " + raw_response.error_message);
+        }
+    } else if (response.empty()) {
+        int attempts = std::max(1, http_config_.max_retries + 1);
+        for (int attempt = 0; attempt < attempts; ++attempt) {
+            CURL* curl = curl_easy_init();
+            if (!curl) {
+                std::cerr << "Failed to initialize CURL" << std::endl;
+                status_code = 0;
+                return "";
+            }
+
+            response.clear();
+            content_type.clear();
+            struct curl_slist* headers = nullptr;
+
+            // Add default headers
+            headers = curl_slist_append(headers, "User-Agent: DatasetCrawler/1.0");
+            headers = curl_slist_append(headers, "Accept: text/html,application/xhtml+xml");
+            headers = curl_slist_append(headers, "Accept-Language: en-US,en;q=0.9");
+            headers = curl_slist_append(headers, "Accept-Encoding: gzip, deflate, br");
+
+            // Add custom headers
+            for (const auto& [key, value] : headers_) {
+                std::string header = key + ": " + value;
+                headers = curl_slist_append(headers, header.c_str());
+            }
+
+            curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_);
+            curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+            curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip, deflate, br");
+
+            // Enable HTTP/2 support (automatically falls back to HTTP/1.1 if HTTP/2 not available)
+            curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0);
+
+            // SSL/TLS configuration for BoringSSL
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);  // Accept any cert for now
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);  // Don't verify hostname
+
+            // Enable connection reuse
+            curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+            curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 120L);
+            curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 60L);
+
+            CURLcode res = curl_easy_perform(curl);
+
+            if (res != CURLE_OK) {
+                std::string error_msg = std::string(curl_easy_strerror(res));
+                if (error_msg.find("Unsupported") != std::string::npos ||
+                    error_msg.find("Invalid") != std::string::npos ||
+                    error_msg.find("malformed") != std::string::npos) {
+                    log_warn("Failed to parse URL: " + error_msg);
+                } else {
+                    log_error("CURL error for " + url + ": " + error_msg);
+                }
+                error_message = error_msg;
+                status_code = 0;
+            } else {
+                long http_code = 0;
+                char* final_url = nullptr;
+                char* content_type_ptr = nullptr;
+                long http_version = 0;
+                curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+                curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &final_url);
+                curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &content_type_ptr);
+                curl_easy_getinfo(curl, CURLINFO_HTTP_VERSION, &http_version);
+
+                if (content_type_ptr) {
+                    content_type = std::string(content_type_ptr);
+                }
+
+                std::string http_version_str;
+                switch (http_version) {
+                    case CURL_HTTP_VERSION_1_0:
+                        http_version_str = "HTTP/1.0";
+                        http10_requests_++;
+                        break;
+                    case CURL_HTTP_VERSION_1_1:
+                        http_version_str = "HTTP/1.1";
+                        http11_requests_++;
+                        break;
+                    case CURL_HTTP_VERSION_2_0:
+                        http_version_str = "HTTP/2";
+                        http2_requests_++;
+                        break;
+                    default:
+                        http_version_str = "HTTP/?.?";
+                }
+
+                if (final_url && final_url != url) {
+                    std::string final_url_str(final_url);
+                    if (final_url_str != url) {
+                        std::ostringstream redirect_msg;
+                        redirect_msg << "The start URL \"" << url << "\" has been redirected to \""
+                                    << final_url_str << "\" [" << http_version_str << "]";
+                        log_warn(redirect_msg.str());
+                    }
+                }
+
+                status_code = static_cast<int>(http_code);
+            }
+
+            curl_slist_free_all(headers);
+            curl_easy_cleanup(curl);
+
+            if (status_code > 0) {
+                break;
+            }
+
+            if (attempt + 1 < attempts) {
+                int backoff = http_config_.retry_backoff_ms * (attempt + 1);
+                std::this_thread::sleep_for(std::chrono::milliseconds(backoff));
             }
         }
-        
-        status_code = static_cast<int>(http_code);
     }
 
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
+    if (enable_headless_rendering_ && (scheme == "http" || scheme == "https") &&
+        needs_headless_rendering(response, status_code)) {
+        int headless_status = 0;
+        std::string headless_error;
+        std::string rendered = fetch_headless_html(url, headless_status, headless_error);
+        if (!rendered.empty()) {
+            status_code = headless_status == 0 ? 200 : headless_status;
+            response = rendered;
+            content_type = "text/html";
+            error_message = headless_error;
+        } else if (!headless_error.empty()) {
+            log_warn("Headless render failed for " + url + ": " + headless_error);
+        }
+    }
     
     // Detect and convert encoding
     std::string encoding = detect_encoding(response, content_type);
@@ -601,9 +825,11 @@ std::string WebCrawler::fetch_html(const std::string& url, int& status_code) {
     auto request_end = std::chrono::steady_clock::now();
     long duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         request_end - request_start).count();
+    last_request_duration_ms_ = duration_ms;
     request_durations_.push_back(duration_ms);
     total_duration_ms_ += duration_ms;
     total_bytes_downloaded_ += response.length();
+    report_request_metric(url, status_code, duration_ms, response.length(), content_type, error_message);
 
     return response;
 }
@@ -650,6 +876,16 @@ DataRecord WebCrawler::fetch(const std::string& url) {
     record.was_allowed = true;
     record.content_length = html.length();
     record.was_skipped = false;
+
+    if (status_code == 200) {
+        std::string canonical = extract_canonical_url(html, url);
+        if (!canonical.empty()) {
+            std::string normalized = normalize_url(canonical);
+            if (!normalized.empty()) {
+                record.url = normalized;
+            }
+        }
+    }
     
     // Check file size
     if (html.length() > max_file_size_bytes_) {
@@ -695,6 +931,8 @@ DataRecord WebCrawler::fetch(const std::string& url) {
 
 std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& urls) {
     std::vector<DataRecord> records;
+    constexpr int kInitialPriority = 0;
+    constexpr int kDiscoveredPriority = 1;
     
     // Clear memory caches
     visited_urls_memory_.clear();
@@ -707,7 +945,7 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
     
     // Enqueue initial URLs to RocksDB
     for (const auto& url : urls) {
-        db_manager_->enqueue_url(normalize_url(url));
+        db_manager_->enqueue_url(normalize_url(url), kInitialPriority);
     }
     
     // Log start of crawling
@@ -722,6 +960,10 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
     
     // Process URLs from RocksDB queue
     while (db_manager_->has_queued_urls()) {
+        if (should_stop()) {
+            log_warn("Graceful shutdown requested; stopping crawl loop.");
+            break;
+        }
         std::string url = db_manager_->dequeue_url();
         
         if (url.empty()) {
@@ -737,6 +979,7 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
         // Mark as visited in both memory and RocksDB
         visited_urls_memory_.insert(normalized);
         db_manager_->mark_visited(normalized);
+        current_domain_ = get_domain(url);
         
         try {
             DataRecord record = fetch(url);
@@ -751,13 +994,19 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
                     
                     // Extract links from the page
                     std::vector<std::string> new_links = extract_links_from_html(record.content, url);
+
+                    // Store link graph edges
+                    for (const auto& link : new_links) {
+                        db_manager_->add_link_edge(normalized, link);
+                        report_link_edge(normalized, link);
+                    }
                     
                     // Filter out already visited links and enqueue to RocksDB
                     std::vector<std::string> unvisited_links;
                     for (const auto& link : new_links) {
                         if (visited_urls_memory_.find(link) == visited_urls_memory_.end() && !db_manager_->is_visited(link)) {
                             unvisited_links.push_back(link);
-                            db_manager_->enqueue_url(link);  // Persist to RocksDB
+                            db_manager_->enqueue_url(link, kDiscoveredPriority);  // Persist to RocksDB
                         }
                     }
                     
@@ -781,6 +1030,8 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
                 blocked_msg << url << " [blocked]";
                 log_warn(blocked_msg.str());
             }
+
+            apply_adaptive_delay(record.status_code);
         } catch (const std::exception& e) {
             std::string error_str = e.what();
             // Check if it's a URL parsing error
@@ -795,6 +1046,8 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
                 error_msg << url << " - " << error_str;
                 log_error(error_msg.str());
             }
+
+            apply_adaptive_delay(0);
         }
     }
     
@@ -877,11 +1130,55 @@ std::vector<std::string> WebCrawler::parse_sitemap_xml(const std::string& xml_co
     return urls;
 }
 
+std::vector<std::string> WebCrawler::parse_sitemap_index_xml(const std::string& xml_content) {
+    std::vector<std::string> urls;
+    std::regex url_regex("<sitemap>\\s*<loc>([^<]+)</loc>", std::regex::icase);
+    std::smatch match;
+    
+    std::string::const_iterator search_start(xml_content.cbegin());
+    while (std::regex_search(search_start, xml_content.cend(), match, url_regex)) {
+        urls.push_back(match[1].str());
+        search_start = match.suffix().first;
+    }
+    
+    return urls;
+}
+
+double WebCrawler::get_crawl_delay_for_domain(const std::string& domain) const {
+    auto it = robots_rules_cache_.find(domain);
+    if (it == robots_rules_cache_.end()) {
+        return 0.0;
+    }
+
+    double delay = 0.0;
+    int best_specificity = -1;
+    for (const auto& rule : it->second) {
+        for (const auto& agent : rule.user_agents) {
+            if (matches_user_agent(agent, user_agent_) && rule.crawl_delay_seconds >= 0.0) {
+                if (rule.specificity > best_specificity) {
+                    best_specificity = rule.specificity;
+                    delay = rule.crawl_delay_seconds;
+                } else if (rule.specificity == best_specificity) {
+                    delay = std::max(delay, rule.crawl_delay_seconds);
+                }
+                break;
+            }
+        }
+    }
+
+    return delay;
+}
+
 std::vector<std::string> WebCrawler::get_sitemaps_from_robots(const std::string& domain) {
     // Check cache first
     auto it = robots_sitemaps_cache_.find(domain);
-    if (it != robots_sitemaps_cache_.end()) {
-        return it->second;
+    auto time_it = robots_sitemaps_cache_time_.find(domain);
+    if (it != robots_sitemaps_cache_.end() && time_it != robots_sitemaps_cache_time_.end()) {
+        auto age = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - time_it->second).count();
+        if (age <= http_config_.sitemaps_cache_ttl_seconds) {
+            return it->second;
+        }
     }
     
     // Fetch robots.txt
@@ -907,6 +1204,7 @@ std::vector<std::string> WebCrawler::get_sitemaps_from_robots(const std::string&
     
     // Cache the result
     robots_sitemaps_cache_[domain] = sitemap_urls;
+    robots_sitemaps_cache_time_[domain] = std::chrono::steady_clock::now();
     return sitemap_urls;
 }
 
@@ -920,6 +1218,14 @@ std::vector<std::string> WebCrawler::fetch_sitemap_urls(const std::string& sitem
     }
     
     std::vector<std::string> urls = parse_sitemap_xml(sitemap_content);
+    if (urls.empty()) {
+        std::vector<std::string> sitemap_indexes = parse_sitemap_index_xml(sitemap_content);
+        for (const auto& index_url : sitemap_indexes) {
+            std::vector<std::string> index_urls = fetch_sitemap_urls(index_url);
+            urls.insert(urls.end(), index_urls.begin(), index_urls.end());
+        }
+    }
+
     std::ostringstream msg;
     msg << "Parsed " << urls.size() << " URLs from sitemap: " << sitemap_url;
     log_info(msg.str());
@@ -1212,6 +1518,174 @@ std::string WebCrawler::convert_to_utf8(const std::string& content, const std::s
     delete[] out_buf;
     
     return converted;
+}
+
+std::string WebCrawler::fetch_headless_html(const std::string& url,
+                                            int& status_code,
+                                            std::string& error_message) {
+    status_code = 0;
+    error_message.clear();
+
+    std::ostringstream command;
+    if (chrome_timeout_seconds_ > 0) {
+        command << "timeout " << chrome_timeout_seconds_ << " ";
+    }
+    command << escape_shell_arg(chrome_path_)
+            << " --headless --disable-gpu --no-sandbox --dump-dom "
+            << "--virtual-time-budget=5000 "
+            << escape_shell_arg(url)
+            << " 2>/dev/null";
+
+    FILE* pipe = popen(command.str().c_str(), "r");
+    if (!pipe) {
+        error_message = "failed to start headless chrome";
+        return "";
+    }
+
+    std::string output;
+    char buffer[4096];
+    while (true) {
+        size_t read_bytes = fread(buffer, 1, sizeof(buffer), pipe);
+        if (read_bytes > 0) {
+            output.append(buffer, read_bytes);
+        }
+        if (read_bytes < sizeof(buffer)) {
+            break;
+        }
+    }
+
+    int exit_code = pclose(pipe);
+    if (output.empty()) {
+        std::ostringstream msg;
+        msg << "headless chrome returned no output (exit " << exit_code << ")";
+        error_message = msg.str();
+        return "";
+    }
+
+    status_code = 200;
+    return output;
+}
+
+void WebCrawler::apply_adaptive_delay(int status_code) {
+    if (!http_config_.enable_adaptive_delay) {
+        return;
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    bool success = status_code >= 200 && status_code < 400;
+    if (success) {
+        consecutive_successes_++;
+        consecutive_failures_ = 0;
+    } else {
+        consecutive_failures_++;
+        consecutive_successes_ = 0;
+    }
+
+    double latency_sample = static_cast<double>(
+        last_request_duration_ms_ > 0 ? last_request_duration_ms_ : http_config_.base_delay_ms);
+    if (latency_ema_ms_ == 0.0) {
+        latency_ema_ms_ = latency_sample;
+    } else {
+        latency_ema_ms_ = http_config_.latency_ema_alpha * latency_sample +
+            (1.0 - http_config_.latency_ema_alpha) * latency_ema_ms_;
+    }
+
+    int queue_size = 0;
+    if (db_manager_) {
+        queue_size = db_manager_->get_queue_size();
+    }
+    double queue_pressure = std::min(1.0, static_cast<double>(queue_size) / 1000.0);
+    double queue_adjust = 1.0 - (0.3 * queue_pressure);
+
+    int latency_based = static_cast<int>(latency_ema_ms_ * 0.6);
+    int base_delay = std::max(http_config_.base_delay_ms, latency_based);
+    int delay_ms = static_cast<int>(base_delay * queue_adjust);
+
+    if (!success) {
+        delay_ms += http_config_.failure_backoff_ms * consecutive_failures_;
+    } else if (consecutive_successes_ > 3) {
+        delay_ms = static_cast<int>(delay_ms * 0.8);
+    }
+
+    if (status_code == 429 || status_code == 503) {
+        int exponent = std::min(consecutive_failures_, 6);
+        delay_ms = static_cast<int>(delay_ms * std::pow(2.0, exponent));
+    }
+
+    if (last_delay_ms_ > 0) {
+        delay_ms = static_cast<int>(0.7 * last_delay_ms_ + 0.3 * delay_ms);
+    }
+
+    delay_ms = std::max(http_config_.min_delay_ms, std::min(delay_ms, http_config_.max_delay_ms));
+
+    if (http_config_.max_qps > 0.0) {
+        int min_interval_ms = static_cast<int>(1000.0 / http_config_.max_qps);
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_request_time_).count();
+        if (elapsed < min_interval_ms) {
+            delay_ms = std::max(delay_ms, min_interval_ms - static_cast<int>(elapsed));
+        }
+    }
+
+    double crawl_delay_seconds = get_crawl_delay_for_domain(current_domain_);
+    if (crawl_delay_seconds > 0.0) {
+        int crawl_delay_ms = static_cast<int>(crawl_delay_seconds * 1000.0);
+        delay_ms = std::max(delay_ms, crawl_delay_ms);
+    }
+
+    int jitter_range = std::max(0, delay_ms * http_config_.jitter_pct / 100);
+    if (jitter_range > 0) {
+        int jitter = (std::rand() % (2 * jitter_range + 1)) - jitter_range;
+        delay_ms = std::max(http_config_.min_delay_ms,
+                            std::min(delay_ms + jitter, http_config_.max_delay_ms));
+    }
+
+    last_delay_ms_ = delay_ms;
+    std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+    last_request_time_ = std::chrono::steady_clock::now();
+}
+
+bool WebCrawler::should_stop() const {
+    if (stop_requested_.load()) {
+        return true;
+    }
+    if (external_stop_flag_ && external_stop_flag_->load()) {
+        return true;
+    }
+    return false;
+}
+
+void WebCrawler::report_request_metric(const std::string& url,
+                                       int status_code,
+                                       long duration_ms,
+                                       size_t bytes,
+                                       const std::string& content_type,
+                                       const std::string& error_message) {
+    if (!clickhouse_client_ || !clickhouse_client_->is_enabled()) {
+        return;
+    }
+
+    ClickHouseRequestMetric metric;
+    metric.url = url;
+    metric.status_code = status_code;
+    metric.duration_ms = duration_ms;
+    metric.bytes = bytes;
+    metric.content_type = content_type;
+    metric.timestamp = format_timestamp();
+    metric.success = status_code >= 200 && status_code < 400;
+    metric.error_message = error_message;
+    clickhouse_client_->insert_request_metric(metric);
+}
+
+void WebCrawler::report_link_edge(const std::string& from_url, const std::string& to_url) {
+    if (!clickhouse_client_ || !clickhouse_client_->is_enabled()) {
+        return;
+    }
+
+    ClickHouseLinkEdge edge;
+    edge.from_url = from_url;
+    edge.to_url = to_url;
+    edge.discovered_at = format_timestamp();
+    clickhouse_client_->insert_link_edge(edge);
 }
 
 /**
