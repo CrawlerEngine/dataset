@@ -12,6 +12,7 @@
 #include <mutex>
 #include <atomic>
 #include "http_config.h"
+#include "clickhouse_client.h"
 #include "rocksdb_manager.h"
 #include "text_extractor.h"
 
@@ -153,6 +154,23 @@ public:
     void set_http_config(const HTTPConfig& config);
     HTTPConfig get_http_config() const;
 
+    /**
+     * Optional headless rendering using Chrome/Chromium.
+     */
+    void set_headless_rendering(bool enable, const std::string& chrome_path, int timeout_seconds);
+
+    /**
+     * ClickHouse metrics/link graph export.
+     */
+    void set_clickhouse_config(const ClickHouseConfig& config);
+
+    /**
+     * Graceful shutdown controls.
+     */
+    void request_stop();
+    void set_stop_flag(std::atomic<bool>* stop_flag);
+    bool is_stop_requested() const;
+
 private:
     std::string user_agent_;
     HTTPConfig http_config_;  // HTTP/1.1, HTTP/2 configuration
@@ -208,6 +226,19 @@ private:
     bool enable_deduplication_;
     std::vector<uint64_t> content_hashes_;  // Store SimHashes for deduplication
     std::mutex dedup_mutex_;
+
+    // Headless rendering
+    bool enable_headless_rendering_;
+    std::string chrome_path_;
+    int chrome_timeout_seconds_;
+
+    // ClickHouse export
+    ClickHouseConfig clickhouse_config_;
+    std::unique_ptr<ClickHouseClient> clickhouse_client_;
+
+    // Graceful shutdown
+    std::atomic<bool> stop_requested_;
+    std::atomic<bool>* external_stop_flag_;
     
     void start_stats_reporter();
     void stop_stats_reporter();
@@ -215,6 +246,15 @@ private:
     std::string format_stats_message(const CrawlerStats& stats);
 
     std::string fetch_html(const std::string& url, int& status_code);
+    std::string fetch_headless_html(const std::string& url, int& status_code, std::string& error_message);
+    bool should_stop() const;
+    void report_request_metric(const std::string& url,
+                               int status_code,
+                               long duration_ms,
+                               size_t bytes,
+                               const std::string& content_type,
+                               const std::string& error_message);
+    void report_link_edge(const std::string& from_url, const std::string& to_url);
     std::string extract_title(const std::string& html);
     bool check_robots_txt(const std::string& url);
     bool check_meta_tags(const std::string& html);
