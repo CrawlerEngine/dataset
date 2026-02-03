@@ -15,6 +15,7 @@ struct RawHttpResponse {
     std::string content_type;
     HTTPVersion http_version = HTTPVersion::UNKNOWN;
     std::string final_url;
+    std::string location;
     bool success = false;
     std::string error_message;
 };
@@ -27,6 +28,7 @@ struct RawSocketRetryConfig {
 struct RawSocketHttpConfig {
     std::chrono::seconds timeout = std::chrono::seconds(30);
     RawSocketRetryConfig retry;
+    int max_redirects = 5;
 };
 
 class CoroutineTask {
