@@ -16,67 +16,12 @@
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
-#include <cstdio>
 
 // Callback for CURL to write data
 static size_t write_callback(void* contents, size_t size, size_t nmemb, std::string* s) {
     s->append((char*)contents, size * nmemb);
     return size * nmemb;
 }
-
-namespace {
-
-std::string escape_shell_arg(const std::string& value) {
-    std::string escaped = "'";
-    for (char c : value) {
-        if (c == '\'') {
-            escaped += "'\\''";
-        } else {
-            escaped += c;
-        }
-    }
-    escaped += "'";
-    return escaped;
-}
-
-std::string format_timestamp() {
-    auto now = std::time(nullptr);
-    auto tm = *std::localtime(&now);
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
-    return oss.str();
-}
-
-bool needs_headless_rendering(const std::string& html, int status_code) {
-    if (status_code != 200) {
-        return false;
-    }
-    if (html.empty()) {
-        return true;
-    }
-    if (html.size() < 256) {
-        return true;
-    }
-    std::string lowered = html;
-    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (lowered.find("enable javascript") != std::string::npos ||
-        lowered.find("please enable javascript") != std::string::npos ||
-        lowered.find("requires javascript") != std::string::npos) {
-        return true;
-    }
-    if (lowered.find("<noscript") != std::string::npos) {
-        return true;
-    }
-    if (lowered.find("id=\"__next\"") != std::string::npos ||
-        lowered.find("data-reactroot") != std::string::npos ||
-        lowered.find("ng-app") != std::string::npos) {
-        return true;
-    }
-    return false;
-}
-
-} // namespace
 
 WebCrawler::WebCrawler(const std::string& user_agent)
     : user_agent_(user_agent),
@@ -120,14 +65,7 @@ WebCrawler::WebCrawler(const std::string& user_agent)
       stats_mutex_(),
       enable_deduplication_(false),
       content_hashes_(),
-      dedup_mutex_(),
-      enable_headless_rendering_(false),
-      chrome_path_("chromium"),
-      chrome_timeout_seconds_(15),
-      clickhouse_config_(),
-      clickhouse_client_(nullptr),
-      stop_requested_(false),
-      external_stop_flag_(nullptr) {
+      dedup_mutex_() {
     curl_global_init(CURL_GLOBAL_DEFAULT);
     crawl_start_time_ = std::chrono::steady_clock::now();
     last_request_time_ = crawl_start_time_;
@@ -157,35 +95,6 @@ void WebCrawler::set_respect_meta_tags(bool respect) {
 
 void WebCrawler::set_max_file_size(size_t size_mb) {
     max_file_size_bytes_ = size_mb * 1024 * 1024;
-}
-
-void WebCrawler::set_headless_rendering(bool enable, const std::string& chrome_path, int timeout_seconds) {
-    enable_headless_rendering_ = enable;
-    if (!chrome_path.empty()) {
-        chrome_path_ = chrome_path;
-    }
-    chrome_timeout_seconds_ = std::max(1, timeout_seconds);
-}
-
-void WebCrawler::set_clickhouse_config(const ClickHouseConfig& config) {
-    clickhouse_config_ = config;
-    if (clickhouse_config_.enabled) {
-        clickhouse_client_ = std::make_unique<ClickHouseClient>(clickhouse_config_);
-    } else {
-        clickhouse_client_.reset();
-    }
-}
-
-void WebCrawler::request_stop() {
-    stop_requested_.store(true);
-}
-
-void WebCrawler::set_stop_flag(std::atomic<bool>* stop_flag) {
-    external_stop_flag_ = stop_flag;
-}
-
-bool WebCrawler::is_stop_requested() const {
-    return should_stop();
 }
 
 int WebCrawler::get_skipped_by_size_count() const {
@@ -632,14 +541,13 @@ std::string WebCrawler::fetch_html(const std::string& url, int& status_code) {
 
     std::string response;
     std::string content_type;
-    std::string error_message;
     std::string scheme;
     auto scheme_pos = url.find("://");
     if (scheme_pos != std::string::npos) {
         scheme = url.substr(0, scheme_pos);
     }
 
-    if (response.empty() && http_config_.use_raw_sockets && (scheme == "http" || scheme == "https")) {
+    if (http_config_.use_raw_sockets && (scheme == "http" || scheme == "https")) {
         RawSocketHttpConfig raw_config;
         raw_config.timeout = std::chrono::seconds(timeout_);
         raw_config.retry.max_retries = http_config_.max_retries;
@@ -659,7 +567,6 @@ std::string WebCrawler::fetch_html(const std::string& url, int& status_code) {
         response = raw_response.body;
         content_type = raw_response.content_type;
         status_code = raw_response.status_code;
-        error_message = raw_response.error_message;
 
         switch (raw_response.http_version) {
             case HTTPVersion::HTTP_1_0:
@@ -678,7 +585,7 @@ std::string WebCrawler::fetch_html(const std::string& url, int& status_code) {
         if (!raw_response.success) {
             log_error("Raw socket error for " + url + ": " + raw_response.error_message);
         }
-    } else if (response.empty()) {
+    } else {
         int attempts = std::max(1, http_config_.max_retries + 1);
         for (int attempt = 0; attempt < attempts; ++attempt) {
             CURL* curl = curl_easy_init();
@@ -736,7 +643,6 @@ std::string WebCrawler::fetch_html(const std::string& url, int& status_code) {
                 } else {
                     log_error("CURL error for " + url + ": " + error_msg);
                 }
-                error_message = error_msg;
                 status_code = 0;
             } else {
                 long http_code = 0;
@@ -796,21 +702,6 @@ std::string WebCrawler::fetch_html(const std::string& url, int& status_code) {
             }
         }
     }
-
-    if (enable_headless_rendering_ && (scheme == "http" || scheme == "https") &&
-        needs_headless_rendering(response, status_code)) {
-        int headless_status = 0;
-        std::string headless_error;
-        std::string rendered = fetch_headless_html(url, headless_status, headless_error);
-        if (!rendered.empty()) {
-            status_code = headless_status == 0 ? 200 : headless_status;
-            response = rendered;
-            content_type = "text/html";
-            error_message = headless_error;
-        } else if (!headless_error.empty()) {
-            log_warn("Headless render failed for " + url + ": " + headless_error);
-        }
-    }
     
     // Detect and convert encoding
     std::string encoding = detect_encoding(response, content_type);
@@ -829,7 +720,6 @@ std::string WebCrawler::fetch_html(const std::string& url, int& status_code) {
     request_durations_.push_back(duration_ms);
     total_duration_ms_ += duration_ms;
     total_bytes_downloaded_ += response.length();
-    report_request_metric(url, status_code, duration_ms, response.length(), content_type, error_message);
 
     return response;
 }
@@ -968,10 +858,6 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
     
     // Process URLs from RocksDB queue
     while (db_manager_->has_queued_urls()) {
-        if (should_stop()) {
-            log_warn("Graceful shutdown requested; stopping crawl loop.");
-            break;
-        }
         std::string url = db_manager_->dequeue_url();
         
         if (url.empty()) {
@@ -1006,7 +892,6 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
                     // Store link graph edges
                     for (const auto& link : new_links) {
                         db_manager_->add_link_edge(normalized, link);
-                        report_link_edge(normalized, link);
                     }
                     
                     // Filter out already visited links and enqueue to RocksDB
@@ -1528,52 +1413,6 @@ std::string WebCrawler::convert_to_utf8(const std::string& content, const std::s
     return converted;
 }
 
-std::string WebCrawler::fetch_headless_html(const std::string& url,
-                                            int& status_code,
-                                            std::string& error_message) {
-    status_code = 0;
-    error_message.clear();
-
-    std::ostringstream command;
-    if (chrome_timeout_seconds_ > 0) {
-        command << "timeout " << chrome_timeout_seconds_ << " ";
-    }
-    command << escape_shell_arg(chrome_path_)
-            << " --headless --disable-gpu --no-sandbox --dump-dom "
-            << "--virtual-time-budget=5000 "
-            << escape_shell_arg(url)
-            << " 2>/dev/null";
-
-    FILE* pipe = popen(command.str().c_str(), "r");
-    if (!pipe) {
-        error_message = "failed to start headless chrome";
-        return "";
-    }
-
-    std::string output;
-    char buffer[4096];
-    while (true) {
-        size_t read_bytes = fread(buffer, 1, sizeof(buffer), pipe);
-        if (read_bytes > 0) {
-            output.append(buffer, read_bytes);
-        }
-        if (read_bytes < sizeof(buffer)) {
-            break;
-        }
-    }
-
-    int exit_code = pclose(pipe);
-    if (output.empty()) {
-        std::ostringstream msg;
-        msg << "headless chrome returned no output (exit " << exit_code << ")";
-        error_message = msg.str();
-        return "";
-    }
-
-    status_code = 200;
-    return output;
-}
-
 void WebCrawler::apply_adaptive_delay(int status_code) {
     if (!http_config_.enable_adaptive_delay) {
         return;
@@ -1650,50 +1489,6 @@ void WebCrawler::apply_adaptive_delay(int status_code) {
     last_delay_ms_ = delay_ms;
     std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
     last_request_time_ = std::chrono::steady_clock::now();
-}
-
-bool WebCrawler::should_stop() const {
-    if (stop_requested_.load()) {
-        return true;
-    }
-    if (external_stop_flag_ && external_stop_flag_->load()) {
-        return true;
-    }
-    return false;
-}
-
-void WebCrawler::report_request_metric(const std::string& url,
-                                       int status_code,
-                                       long duration_ms,
-                                       size_t bytes,
-                                       const std::string& content_type,
-                                       const std::string& error_message) {
-    if (!clickhouse_client_ || !clickhouse_client_->is_enabled()) {
-        return;
-    }
-
-    ClickHouseRequestMetric metric;
-    metric.url = url;
-    metric.status_code = status_code;
-    metric.duration_ms = duration_ms;
-    metric.bytes = bytes;
-    metric.content_type = content_type;
-    metric.timestamp = format_timestamp();
-    metric.success = status_code >= 200 && status_code < 400;
-    metric.error_message = error_message;
-    clickhouse_client_->insert_request_metric(metric);
-}
-
-void WebCrawler::report_link_edge(const std::string& from_url, const std::string& to_url) {
-    if (!clickhouse_client_ || !clickhouse_client_->is_enabled()) {
-        return;
-    }
-
-    ClickHouseLinkEdge edge;
-    edge.from_url = from_url;
-    edge.to_url = to_url;
-    edge.discovered_at = format_timestamp();
-    clickhouse_client_->insert_link_edge(edge);
 }
 
 /**

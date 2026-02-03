@@ -7,20 +7,6 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
-#include <atomic>
-#include <csignal>
-
-namespace {
-
-std::atomic<bool>* g_stop_flag = nullptr;
-
-void handle_signal(int /*signal*/) {
-    if (g_stop_flag) {
-        g_stop_flag->store(true);
-    }
-}
-
-} // namespace
 
 int main(int argc, char* argv[]) {
     // Initialize logger with colors
@@ -50,12 +36,6 @@ int main(int argc, char* argv[]) {
         // Create crawler instance
         WebCrawler crawler(config.user_agent);
         crawler.set_timeout(config.timeout);
-
-        std::atomic<bool> stop_flag(false);
-        g_stop_flag = &stop_flag;
-        std::signal(SIGINT, handle_signal);
-        std::signal(SIGTERM, handle_signal);
-        crawler.set_stop_flag(&stop_flag);
         
         // Enable robots.txt and meta-tag checking
         crawler.set_respect_robots_txt(config.respect_robots_txt);
@@ -70,21 +50,6 @@ int main(int argc, char* argv[]) {
         crawler.set_http_config(http_config);
         
         log_info("HTTP/2 support enabled (with HTTP/1.1 fallback via BoringSSL)");
-
-        crawler.set_headless_rendering(config.enable_headless_rendering,
-                                       config.chrome_path,
-                                       config.chrome_timeout_seconds);
-
-        ClickHouseConfig clickhouse_config;
-        clickhouse_config.enabled = config.clickhouse_enabled;
-        clickhouse_config.endpoint = config.clickhouse_endpoint;
-        clickhouse_config.database = config.clickhouse_database;
-        clickhouse_config.metrics_table = config.clickhouse_metrics_table;
-        clickhouse_config.link_graph_table = config.clickhouse_link_graph_table;
-        clickhouse_config.user = config.clickhouse_user;
-        clickhouse_config.password = config.clickhouse_password;
-        clickhouse_config.timeout_seconds = config.clickhouse_timeout_seconds;
-        crawler.set_clickhouse_config(clickhouse_config);
 
         // Enable periodic statistics reporting (every minute)
         crawler.enable_periodic_stats(true);
@@ -125,7 +90,6 @@ int main(int argc, char* argv[]) {
         summary << "Crawling complete. Total records: " << records.size();
         log_info(summary.str());
 
-        g_stop_flag = nullptr;
         return 0;
 
     } catch (const std::exception& e) {

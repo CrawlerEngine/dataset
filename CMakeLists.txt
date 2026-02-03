@@ -22,7 +22,6 @@ set(SOURCES
     src/text_extractor.cpp
     src/rocksdb_manager.cpp
     src/raw_socket_http.cpp
-    src/clickhouse_client.cpp
 )
 
 # Create executable
@@ -55,7 +54,6 @@ add_executable(test_robots_ua_priority
     src/text_extractor.cpp
     src/rocksdb_manager.cpp
     src/raw_socket_http.cpp
-    src/clickhouse_client.cpp
 )
 
 target_link_libraries(test_robots_ua_priority
@@ -83,7 +81,6 @@ add_executable(test_robots_integration
     src/text_extractor.cpp
     src/rocksdb_manager.cpp
     src/raw_socket_http.cpp
-    src/clickhouse_client.cpp
 )
 
 target_link_libraries(test_robots_integration
@@ -110,7 +107,6 @@ add_executable(test_robots_wildcard
     src/text_extractor.cpp
     src/rocksdb_manager.cpp
     src/raw_socket_http.cpp
-    src/clickhouse_client.cpp
 )
 
 target_link_libraries(test_robots_wildcard

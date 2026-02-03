@@ -60,39 +60,6 @@ CrawlerConfig ConfigLoader::from_command_line(int argc, char* argv[]) {
         if (arg == "--output-dir" && i + 1 < argc) {
             config.output_dir = argv[i + 1];
         }
-        if (arg == "--headless") {
-            config.enable_headless_rendering = true;
-        }
-        if (arg == "--chrome-path" && i + 1 < argc) {
-            config.chrome_path = argv[i + 1];
-        }
-        if (arg == "--chrome-timeout" && i + 1 < argc) {
-            config.chrome_timeout_seconds = std::stoi(argv[i + 1]);
-        }
-        if (arg == "--clickhouse-enabled") {
-            config.clickhouse_enabled = true;
-        }
-        if (arg == "--clickhouse-endpoint" && i + 1 < argc) {
-            config.clickhouse_endpoint = argv[i + 1];
-        }
-        if (arg == "--clickhouse-db" && i + 1 < argc) {
-            config.clickhouse_database = argv[i + 1];
-        }
-        if (arg == "--clickhouse-metrics-table" && i + 1 < argc) {
-            config.clickhouse_metrics_table = argv[i + 1];
-        }
-        if (arg == "--clickhouse-link-table" && i + 1 < argc) {
-            config.clickhouse_link_graph_table = argv[i + 1];
-        }
-        if (arg == "--clickhouse-user" && i + 1 < argc) {
-            config.clickhouse_user = argv[i + 1];
-        }
-        if (arg == "--clickhouse-password" && i + 1 < argc) {
-            config.clickhouse_password = argv[i + 1];
-        }
-        if (arg == "--clickhouse-timeout" && i + 1 < argc) {
-            config.clickhouse_timeout_seconds = std::stoi(argv[i + 1]);
-        }
     }
     
     return config;
@@ -154,21 +121,6 @@ void ConfigLoader::save(const std::string& filepath, const CrawlerConfig& config
                 file << "\n";
             }
         }
-        file << "  },\n";
-        file << "  \"headless\": {\n";
-        file << "    \"enabled\": " << (config.enable_headless_rendering ? "true" : "false") << ",\n";
-        file << "    \"chrome_path\": \"" << config.chrome_path << "\",\n";
-        file << "    \"timeout_seconds\": " << config.chrome_timeout_seconds << "\n";
-        file << "  },\n";
-        file << "  \"clickhouse\": {\n";
-        file << "    \"enabled\": " << (config.clickhouse_enabled ? "true" : "false") << ",\n";
-        file << "    \"endpoint\": \"" << config.clickhouse_endpoint << "\",\n";
-        file << "    \"database\": \"" << config.clickhouse_database << "\",\n";
-        file << "    \"metrics_table\": \"" << config.clickhouse_metrics_table << "\",\n";
-        file << "    \"link_graph_table\": \"" << config.clickhouse_link_graph_table << "\",\n";
-        file << "    \"user\": \"" << config.clickhouse_user << "\",\n";
-        file << "    \"password\": \"" << config.clickhouse_password << "\",\n";
-        file << "    \"timeout_seconds\": " << config.clickhouse_timeout_seconds << "\n";
         file << "  }\n";
         file << "}\n";
 
@@ -248,106 +200,6 @@ CrawlerConfig ConfigLoader::parse_json(const std::string& json_str) {
             size_t quote1_pos = json_str.find("\"", colon_pos);
             size_t quote2_pos = json_str.find("\"", quote1_pos + 1);
             config.output_dir = json_str.substr(quote1_pos + 1, quote2_pos - quote1_pos - 1);
-        }
-
-        // Extract headless settings
-        size_t headless_pos = json_str.find("\"headless\"");
-        if (headless_pos != std::string::npos) {
-            size_t enabled_pos = json_str.find("\"enabled\"", headless_pos);
-            if (enabled_pos != std::string::npos) {
-                size_t colon_pos = json_str.find(":", enabled_pos);
-                size_t comma_pos = json_str.find(",", colon_pos);
-                std::string enabled_str = json_str.substr(colon_pos + 1, comma_pos - colon_pos - 1);
-                enabled_str.erase(0, enabled_str.find_first_not_of(" \t\n\r"));
-                config.enable_headless_rendering = enabled_str.find("true") != std::string::npos;
-            }
-
-            size_t chrome_path_pos = json_str.find("\"chrome_path\"", headless_pos);
-            if (chrome_path_pos != std::string::npos) {
-                size_t colon_pos = json_str.find(":", chrome_path_pos);
-                size_t quote1_pos = json_str.find("\"", colon_pos);
-                size_t quote2_pos = json_str.find("\"", quote1_pos + 1);
-                config.chrome_path = json_str.substr(quote1_pos + 1, quote2_pos - quote1_pos - 1);
-            }
-
-            size_t timeout_pos = json_str.find("\"timeout_seconds\"", headless_pos);
-            if (timeout_pos != std::string::npos) {
-                size_t colon_pos = json_str.find(":", timeout_pos);
-                size_t comma_pos = json_str.find(",", colon_pos);
-                std::string timeout_str = json_str.substr(colon_pos + 1, comma_pos - colon_pos - 1);
-                timeout_str.erase(0, timeout_str.find_first_not_of(" \t\n\r"));
-                config.chrome_timeout_seconds = std::stoi(timeout_str);
-            }
-        }
-
-        // Extract ClickHouse settings
-        size_t clickhouse_pos = json_str.find("\"clickhouse\"");
-        if (clickhouse_pos != std::string::npos) {
-            size_t enabled_pos = json_str.find("\"enabled\"", clickhouse_pos);
-            if (enabled_pos != std::string::npos) {
-                size_t colon_pos = json_str.find(":", enabled_pos);
-                size_t comma_pos = json_str.find(",", colon_pos);
-                std::string enabled_str = json_str.substr(colon_pos + 1, comma_pos - colon_pos - 1);
-                enabled_str.erase(0, enabled_str.find_first_not_of(" \t\n\r"));
-                config.clickhouse_enabled = enabled_str.find("true") != std::string::npos;
-            }
-
-            size_t endpoint_pos = json_str.find("\"endpoint\"", clickhouse_pos);
-            if (endpoint_pos != std::string::npos) {
-                size_t colon_pos = json_str.find(":", endpoint_pos);
-                size_t quote1_pos = json_str.find("\"", colon_pos);
-                size_t quote2_pos = json_str.find("\"", quote1_pos + 1);
-                config.clickhouse_endpoint = json_str.substr(quote1_pos + 1, quote2_pos - quote1_pos - 1);
-            }
-
-            size_t database_pos = json_str.find("\"database\"", clickhouse_pos);
-            if (database_pos != std::string::npos) {
-                size_t colon_pos = json_str.find(":", database_pos);
-                size_t quote1_pos = json_str.find("\"", colon_pos);
-                size_t quote2_pos = json_str.find("\"", quote1_pos + 1);
-                config.clickhouse_database = json_str.substr(quote1_pos + 1, quote2_pos - quote1_pos - 1);
-            }
-
-            size_t metrics_pos = json_str.find("\"metrics_table\"", clickhouse_pos);
-            if (metrics_pos != std::string::npos) {
-                size_t colon_pos = json_str.find(":", metrics_pos);
-                size_t quote1_pos = json_str.find("\"", colon_pos);
-                size_t quote2_pos = json_str.find("\"", quote1_pos + 1);
-                config.clickhouse_metrics_table = json_str.substr(quote1_pos + 1, quote2_pos - quote1_pos - 1);
-            }
-
-            size_t link_table_pos = json_str.find("\"link_graph_table\"", clickhouse_pos);
-            if (link_table_pos != std::string::npos) {
-                size_t colon_pos = json_str.find(":", link_table_pos);
-                size_t quote1_pos = json_str.find("\"", colon_pos);
-                size_t quote2_pos = json_str.find("\"", quote1_pos + 1);
-                config.clickhouse_link_graph_table = json_str.substr(quote1_pos + 1, quote2_pos - quote1_pos - 1);
-            }
-
-            size_t user_pos = json_str.find("\"user\"", clickhouse_pos);
-            if (user_pos != std::string::npos) {
-                size_t colon_pos = json_str.find(":", user_pos);
-                size_t quote1_pos = json_str.find("\"", colon_pos);
-                size_t quote2_pos = json_str.find("\"", quote1_pos + 1);
-                config.clickhouse_user = json_str.substr(quote1_pos + 1, quote2_pos - quote1_pos - 1);
-            }
-
-            size_t password_pos = json_str.find("\"password\"", clickhouse_pos);
-            if (password_pos != std::string::npos) {
-                size_t colon_pos = json_str.find(":", password_pos);
-                size_t quote1_pos = json_str.find("\"", colon_pos);
-                size_t quote2_pos = json_str.find("\"", quote1_pos + 1);
-                config.clickhouse_password = json_str.substr(quote1_pos + 1, quote2_pos - quote1_pos - 1);
-            }
-
-            size_t timeout_pos = json_str.find("\"timeout_seconds\"", clickhouse_pos);
-            if (timeout_pos != std::string::npos) {
-                size_t colon_pos = json_str.find(":", timeout_pos);
-                size_t comma_pos = json_str.find(",", colon_pos);
-                std::string timeout_str = json_str.substr(colon_pos + 1, comma_pos - colon_pos - 1);
-                timeout_str.erase(0, timeout_str.find_first_not_of(" \t\n\r"));
-                config.clickhouse_timeout_seconds = std::stoi(timeout_str);
-            }
         }
 
         // Extract URLs
