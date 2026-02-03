@@ -10,6 +10,7 @@
 #include <chrono>
 #include <thread>
 #include <mutex>
+#include <condition_variable>
 #include <atomic>
 #include "http_config.h"
 #include "clickhouse_client.h"
@@ -72,7 +73,13 @@ public:
     /**
      * Crawl multiple URLs
      */
-    std::vector<DataRecord> crawl_urls(const std::vector<std::string>& urls);
+    std::vector<DataRecord> crawl_urls(const std::vector<std::string>& urls,
+                                       bool wait_for_new_urls = false);
+
+    /**
+     * Enqueue a URL for crawling.
+     */
+    bool enqueue_url(const std::string& url, int priority = 0);
 
     /**
      * Set connection timeout (in seconds)
@@ -239,6 +246,9 @@ private:
     // Graceful shutdown
     std::atomic<bool> stop_requested_;
     std::atomic<bool>* external_stop_flag_;
+    bool db_initialized_;
+    std::mutex queue_mutex_;
+    std::condition_variable queue_cv_;
     
     void start_stats_reporter();
     void stop_stats_reporter();
@@ -248,6 +258,7 @@ private:
     std::string fetch_html(const std::string& url, int& status_code);
     std::string fetch_headless_html(const std::string& url, int& status_code, std::string& error_message);
     bool should_stop() const;
+    bool ensure_db_initialized();
     void report_request_metric(const std::string& url,
                                int status_code,
                                long duration_ms,

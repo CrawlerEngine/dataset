@@ -127,7 +127,10 @@ WebCrawler::WebCrawler(const std::string& user_agent)
       clickhouse_config_(),
       clickhouse_client_(nullptr),
       stop_requested_(false),
-      external_stop_flag_(nullptr) {
+      external_stop_flag_(nullptr),
+      db_initialized_(false),
+      queue_mutex_(),
+      queue_cv_() {
     curl_global_init(CURL_GLOBAL_DEFAULT);
     crawl_start_time_ = std::chrono::steady_clock::now();
     last_request_time_ = crawl_start_time_;
@@ -186,6 +189,28 @@ void WebCrawler::set_stop_flag(std::atomic<bool>* stop_flag) {
 
 bool WebCrawler::is_stop_requested() const {
     return should_stop();
+}
+
+bool WebCrawler::enqueue_url(const std::string& url, int priority) {
+    if (!ensure_db_initialized()) {
+        return false;
+    }
+
+    std::string normalized = normalize_url(url);
+    if (normalized.empty()) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (visited_urls_memory_.find(normalized) != visited_urls_memory_.end() ||
+        db_manager_->is_visited(normalized)) {
+        return false;
+    }
+    bool enqueued = db_manager_->enqueue_url(normalized, priority);
+    if (enqueued) {
+        queue_cv_.notify_one();
+    }
+    return enqueued;
 }
 
 int WebCrawler::get_skipped_by_size_count() const {
@@ -929,7 +954,8 @@ DataRecord WebCrawler::fetch(const std::string& url) {
     return record;
 }
 
-std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& urls) {
+std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& urls,
+                                               bool wait_for_new_urls) {
     std::vector<DataRecord> records;
     constexpr int kInitialPriority = 0;
     constexpr int kDiscoveredPriority = 1;
@@ -977,11 +1003,45 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
         if (url.empty()) {
             break;
         }
+
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            if (!db_manager_->has_queued_urls()) {
+                if (!wait_for_new_urls) {
+                    break;
+                }
+            }
+        }
+
+        if (wait_for_new_urls) {
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            queue_cv_.wait_for(lock, std::chrono::milliseconds(500), [this]() {
+                return should_stop() || (db_manager_ && db_manager_->has_queued_urls());
+            });
+            if (!db_manager_ || !db_manager_->has_queued_urls()) {
+                continue;
+            }
+        }
+
+        std::string url;
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            url = db_manager_->dequeue_url();
+        }
+        if (url.empty()) {
+            continue;
+        }
         
         // Skip if already visited (check both memory cache and RocksDB)
         std::string normalized = normalize_url(url);
-        if (visited_urls_memory_.find(normalized) != visited_urls_memory_.end() || db_manager_->is_visited(normalized)) {
-            continue;
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            if (visited_urls_memory_.find(normalized) != visited_urls_memory_.end() ||
+                db_manager_->is_visited(normalized)) {
+                continue;
+            }
+            visited_urls_memory_.insert(normalized);
+            db_manager_->mark_visited(normalized);
         }
         
         // Mark as visited in both memory and RocksDB

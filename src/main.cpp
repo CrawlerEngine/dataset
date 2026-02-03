@@ -106,8 +106,26 @@ int main(int argc, char* argv[]) {
                    << "meta-tags: " << (config.respect_meta_tags ? "YES" : "NO");
         log_info(config_msg.str());
 
+        std::vector<std::string> initial_urls = config.urls;
+        if (config.api_enabled) {
+            if (!initial_urls.empty()) {
+                log_warn("API mode enabled; ignoring initial URLs.");
+            }
+            initial_urls.clear();
+        }
+
+        std::thread api_thread;
+        if (config.api_enabled) {
+            api_thread = std::thread(run_api_server, &crawler, config, &stop_flag);
+        }
+
         // Crawl URLs
-        auto records = crawler.crawl_urls(config.urls);
+        auto records = crawler.crawl_urls(initial_urls, config.api_enabled);
+
+        stop_flag.store(true);
+        if (api_thread.joinable()) {
+            api_thread.join();
+        }
 
         // Write to files
         ParquetDatasetWriter writer;

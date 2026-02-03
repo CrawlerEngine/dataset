@@ -93,6 +93,15 @@ CrawlerConfig ConfigLoader::from_command_line(int argc, char* argv[]) {
         if (arg == "--clickhouse-timeout" && i + 1 < argc) {
             config.clickhouse_timeout_seconds = std::stoi(argv[i + 1]);
         }
+        if (arg == "--api-enabled") {
+            config.api_enabled = true;
+        }
+        if (arg == "--api-bind" && i + 1 < argc) {
+            config.api_bind_address = argv[i + 1];
+        }
+        if (arg == "--api-port" && i + 1 < argc) {
+            config.api_port = std::stoi(argv[i + 1]);
+        }
     }
     
     return config;
@@ -169,6 +178,11 @@ void ConfigLoader::save(const std::string& filepath, const CrawlerConfig& config
         file << "    \"user\": \"" << config.clickhouse_user << "\",\n";
         file << "    \"password\": \"" << config.clickhouse_password << "\",\n";
         file << "    \"timeout_seconds\": " << config.clickhouse_timeout_seconds << "\n";
+        file << "  },\n";
+        file << "  \"api\": {\n";
+        file << "    \"enabled\": " << (config.api_enabled ? "true" : "false") << ",\n";
+        file << "    \"bind_address\": \"" << config.api_bind_address << "\",\n";
+        file << "    \"port\": " << config.api_port << "\n";
         file << "  }\n";
         file << "}\n";
 
@@ -347,6 +361,36 @@ CrawlerConfig ConfigLoader::parse_json(const std::string& json_str) {
                 std::string timeout_str = json_str.substr(colon_pos + 1, comma_pos - colon_pos - 1);
                 timeout_str.erase(0, timeout_str.find_first_not_of(" \t\n\r"));
                 config.clickhouse_timeout_seconds = std::stoi(timeout_str);
+            }
+        }
+
+        // Extract API settings
+        size_t api_pos = json_str.find("\"api\"");
+        if (api_pos != std::string::npos) {
+            size_t enabled_pos = json_str.find("\"enabled\"", api_pos);
+            if (enabled_pos != std::string::npos) {
+                size_t colon_pos = json_str.find(":", enabled_pos);
+                size_t comma_pos = json_str.find(",", colon_pos);
+                std::string enabled_str = json_str.substr(colon_pos + 1, comma_pos - colon_pos - 1);
+                enabled_str.erase(0, enabled_str.find_first_not_of(" \t\n\r"));
+                config.api_enabled = enabled_str.find("true") != std::string::npos;
+            }
+
+            size_t bind_pos = json_str.find("\"bind_address\"", api_pos);
+            if (bind_pos != std::string::npos) {
+                size_t colon_pos = json_str.find(":", bind_pos);
+                size_t quote1_pos = json_str.find("\"", colon_pos);
+                size_t quote2_pos = json_str.find("\"", quote1_pos + 1);
+                config.api_bind_address = json_str.substr(quote1_pos + 1, quote2_pos - quote1_pos - 1);
+            }
+
+            size_t port_pos = json_str.find("\"port\"", api_pos);
+            if (port_pos != std::string::npos) {
+                size_t colon_pos = json_str.find(":", port_pos);
+                size_t comma_pos = json_str.find(",", colon_pos);
+                std::string port_str = json_str.substr(colon_pos + 1, comma_pos - colon_pos - 1);
+                port_str.erase(0, port_str.find_first_not_of(" \t\n\r"));
+                config.api_port = std::stoi(port_str);
             }
         }
 

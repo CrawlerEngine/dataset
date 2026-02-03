@@ -44,6 +44,11 @@ struct CrawlerConfig {
     std::string clickhouse_password;
     int clickhouse_timeout_seconds;
 
+    // API server for enqueueing URLs
+    bool api_enabled;
+    std::string api_bind_address;
+    int api_port;
+
     // Default constructor
     CrawlerConfig() 
         : timeout(30), max_retries(3), user_agent("DatasetCrawler/1.0"),
@@ -60,7 +65,10 @@ struct CrawlerConfig {
           clickhouse_link_graph_table("crawler_link_graph"),
           clickhouse_user(""),
           clickhouse_password(""),
-          clickhouse_timeout_seconds(5) {
+          clickhouse_timeout_seconds(5),
+          api_enabled(false),
+          api_bind_address("0.0.0.0"),
+          api_port(8080) {
     }
 };
 
