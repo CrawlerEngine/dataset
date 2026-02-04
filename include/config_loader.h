@@ -29,12 +29,46 @@ struct CrawlerConfig {
     // Custom headers
     std::map<std::string, std::string> headers;
 
+    // Headless Chrome rendering
+    bool enable_headless_rendering;
+    std::string chrome_path;
+    int chrome_timeout_seconds;
+
+    // ClickHouse metrics/link graph
+    bool clickhouse_enabled;
+    std::string clickhouse_endpoint;
+    std::string clickhouse_database;
+    std::string clickhouse_metrics_table;
+    std::string clickhouse_link_graph_table;
+    std::string clickhouse_user;
+    std::string clickhouse_password;
+    int clickhouse_timeout_seconds;
+
+    // API server for enqueueing URLs
+    bool api_enabled;
+    std::string api_bind_address;
+    int api_port;
+
     // Default constructor
     CrawlerConfig() 
         : timeout(30), max_retries(3), user_agent("DatasetCrawler/1.0"),
           follow_redirects(true), respect_robots_txt(true),
           respect_meta_tags(true), output_format("json"),
-          output_dir("./output"), batch_size(1000) {
+          output_dir("./output"), batch_size(1000),
+          enable_headless_rendering(false),
+          chrome_path("chromium"),
+          chrome_timeout_seconds(15),
+          clickhouse_enabled(false),
+          clickhouse_endpoint("http://localhost:8123"),
+          clickhouse_database("default"),
+          clickhouse_metrics_table("crawler_metrics"),
+          clickhouse_link_graph_table("crawler_link_graph"),
+          clickhouse_user(""),
+          clickhouse_password(""),
+          clickhouse_timeout_seconds(5),
+          api_enabled(false),
+          api_bind_address("0.0.0.0"),
+          api_port(8080) {
     }
 };
 
