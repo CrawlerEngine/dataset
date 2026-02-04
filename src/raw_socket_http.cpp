@@ -5,7 +5,6 @@
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
-#include <mutex>
 #include <map>
 #include <netdb.h>
 #include <openssl/err.h>
@@ -13,7 +12,6 @@
 #include <poll.h>
 #include <sstream>
 #include <string>
-#include <unordered_map>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -26,19 +24,6 @@ struct ParsedUrl {
     int port = 80;
     bool valid = false;
 };
-
-struct ResolvedAddress {
-    sockaddr_storage addr {};
-    socklen_t addr_len = 0;
-    int family = AF_UNSPEC;
-    int socktype = SOCK_STREAM;
-    int protocol = 0;
-    std::chrono::steady_clock::time_point expires_at;
-};
-
-std::unordered_map<std::string, ResolvedAddress> g_dns_cache;
-std::mutex g_dns_mutex;
-constexpr std::chrono::seconds kDnsCacheTtl(300);
 
 ParsedUrl parse_url(const std::string& url) {
     ParsedUrl parsed;
@@ -65,51 +50,6 @@ ParsedUrl parse_url(const std::string& url) {
 
     parsed.valid = !parsed.scheme.empty() && !parsed.host.empty();
     return parsed;
-}
-
-bool resolve_host_cached(const std::string& host,
-                         int port,
-                         ResolvedAddress& out,
-                         std::string& error) {
-    const std::string key = host + ":" + std::to_string(port);
-    auto now = std::chrono::steady_clock::now();
-    {
-        std::lock_guard<std::mutex> lock(g_dns_mutex);
-        auto it = g_dns_cache.find(key);
-        if (it != g_dns_cache.end() && now < it->second.expires_at) {
-            out = it->second;
-            return true;
-        }
-    }
-
-    struct addrinfo hints {};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    struct addrinfo* addr_info = nullptr;
-    const std::string port_str = std::to_string(port);
-    int result = getaddrinfo(host.c_str(), port_str.c_str(), &hints, &addr_info);
-    if (result != 0) {
-        error = gai_strerror(result);
-        return false;
-    }
-
-    ResolvedAddress resolved;
-    resolved.family = addr_info->ai_family;
-    resolved.socktype = addr_info->ai_socktype;
-    resolved.protocol = addr_info->ai_protocol;
-    resolved.addr_len = static_cast<socklen_t>(addr_info->ai_addrlen);
-    std::memcpy(&resolved.addr, addr_info->ai_addr, addr_info->ai_addrlen);
-    resolved.expires_at = now + kDnsCacheTtl;
-    freeaddrinfo(addr_info);
-
-    {
-        std::lock_guard<std::mutex> lock(g_dns_mutex);
-        g_dns_cache[key] = resolved;
-    }
-
-    out = resolved;
-    return true;
 }
 
 HTTPVersion parse_http_version(const std::string& status_line) {
@@ -249,10 +189,8 @@ void set_socket_timeouts(int socket_fd, std::chrono::seconds timeout) {
     setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
 
-int connect_with_timeout(const ResolvedAddress& resolved,
-                         std::chrono::seconds timeout,
-                         std::string& error) {
-    int socket_fd = socket(resolved.family, resolved.socktype, resolved.protocol);
+int connect_with_timeout(struct addrinfo* addr_info, std::chrono::seconds timeout, std::string& error) {
+    int socket_fd = socket(addr_info->ai_family, addr_info->ai_socktype, addr_info->ai_protocol);
     if (socket_fd < 0) {
         error = std::strerror(errno);
         return -1;
@@ -265,9 +203,7 @@ int connect_with_timeout(const ResolvedAddress& resolved,
         return -1;
     }
 
-    int connect_result = connect(socket_fd,
-                                 reinterpret_cast<const sockaddr*>(&resolved.addr),
-                                 resolved.addr_len);
+    int connect_result = connect(socket_fd, addr_info->ai_addr, addr_info->ai_addrlen);
     if (connect_result == 0) {
         fcntl(socket_fd, F_SETFL, flags);
         set_socket_timeouts(socket_fd, timeout);
@@ -363,6 +299,9 @@ public:
         if (socket_fd_ >= 0) {
             close(socket_fd_);
         }
+        if (addr_info_) {
+            freeaddrinfo(addr_info_);
+        }
     }
 
     bool step() override {
@@ -417,11 +356,18 @@ private:
     };
 
     bool init_socket() {
-        if (!resolve_host_cached(parsed_.host, parsed_.port, resolved_, response_.error_message)) {
+        struct addrinfo hints {};
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+
+        const std::string port_str = std::to_string(parsed_.port);
+        int result = getaddrinfo(parsed_.host.c_str(), port_str.c_str(), &hints, &addr_info_);
+        if (result != 0) {
+            response_.error_message = gai_strerror(result);
             return false;
         }
 
-        socket_fd_ = socket(resolved_.family, resolved_.socktype, resolved_.protocol);
+        socket_fd_ = socket(addr_info_->ai_family, addr_info_->ai_socktype, addr_info_->ai_protocol);
         if (socket_fd_ < 0) {
             response_.error_message = std::strerror(errno);
             return false;
@@ -433,9 +379,7 @@ private:
             return false;
         }
 
-        int connect_result = connect(socket_fd_,
-                                     reinterpret_cast<const sockaddr*>(&resolved_.addr),
-                                     resolved_.addr_len);
+        int connect_result = connect(socket_fd_, addr_info_->ai_addr, addr_info_->ai_addrlen);
         if (connect_result == 0) {
             state_ = State::Sending;
         } else if (errno == EINPROGRESS) {
@@ -570,7 +514,7 @@ private:
     std::chrono::seconds timeout_;
     std::chrono::steady_clock::time_point start_time_;
     ParsedUrl parsed_;
-    ResolvedAddress resolved_ {};
+    struct addrinfo* addr_info_ = nullptr;
     int socket_fd_ = -1;
     State state_ = State::Init;
     bool complete_ = false;
@@ -622,15 +566,22 @@ RawHttpResponse RawSocketHttpClient::fetch(const std::string& url,
         int redirects_remaining = std::max(0, config_.max_redirects);
         for (int attempt = 0; attempt < attempts; ++attempt) {
             std::string error;
+            struct addrinfo hints {};
+            hints.ai_family = AF_UNSPEC;
+            hints.ai_socktype = SOCK_STREAM;
+
+            struct addrinfo* addr_info = nullptr;
             parsed = parse_url(current_url);
-            ResolvedAddress resolved;
-            if (!resolve_host_cached(parsed.host, parsed.port, resolved, error)) {
-                response.error_message = error;
+            const std::string port_str = std::to_string(parsed.port);
+            int result = getaddrinfo(parsed.host.c_str(), port_str.c_str(), &hints, &addr_info);
+            if (result != 0) {
+                response.error_message = gai_strerror(result);
                 return response;
             }
 
-            int socket_fd = connect_with_timeout(resolved, config_.timeout, error);
+            int socket_fd = connect_with_timeout(addr_info, config_.timeout, error);
             if (socket_fd < 0) {
+                freeaddrinfo(addr_info);
                 response.error_message = error;
                 continue;
             }
@@ -639,6 +590,7 @@ RawHttpResponse RawSocketHttpClient::fetch(const std::string& url,
             if (!ctx) {
                 response.error_message = "failed to create SSL context";
                 close(socket_fd);
+                freeaddrinfo(addr_info);
                 return response;
             }
 
@@ -647,6 +599,7 @@ RawHttpResponse RawSocketHttpClient::fetch(const std::string& url,
                 response.error_message = "failed to create SSL session";
                 SSL_CTX_free(ctx);
                 close(socket_fd);
+                freeaddrinfo(addr_info);
                 return response;
             }
 
@@ -657,6 +610,7 @@ RawHttpResponse RawSocketHttpClient::fetch(const std::string& url,
                 SSL_free(ssl);
                 SSL_CTX_free(ctx);
                 close(socket_fd);
+                freeaddrinfo(addr_info);
                 continue;
             }
 
@@ -700,6 +654,7 @@ RawHttpResponse RawSocketHttpClient::fetch(const std::string& url,
             SSL_free(ssl);
             SSL_CTX_free(ctx);
             close(socket_fd);
+            freeaddrinfo(addr_info);
 
             if (response.success) {
                 if (response.status_code == 301 || response.status_code == 302 ||
