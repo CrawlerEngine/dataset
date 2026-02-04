@@ -970,6 +970,9 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
         return records;
     }
     
+    std::cout << "INFO: RocksDB initialized successfully" << std::endl;
+    log_info("RocksDB initialized successfully");
+    
     // Enqueue initial URLs to RocksDB
     for (const auto& url : urls) {
         enqueue_url(url, kInitialPriority);
@@ -986,9 +989,14 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
     auto crawl_start = std::chrono::steady_clock::now();
     
     // Process URLs from RocksDB queue
-    while (true) {
+    while (db_manager_->has_queued_urls()) {
         if (should_stop()) {
             log_warn("Graceful shutdown requested; stopping crawl loop.");
+            break;
+        }
+        std::string url = db_manager_->dequeue_url();
+        
+        if (url.empty()) {
             break;
         }
 
@@ -1031,6 +1039,10 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
             visited_urls_memory_.insert(normalized);
             db_manager_->mark_visited(normalized);
         }
+        
+        // Mark as visited in both memory and RocksDB
+        visited_urls_memory_.insert(normalized);
+        db_manager_->mark_visited(normalized);
         current_domain_ = get_domain(url);
         
         try {
@@ -1048,24 +1060,17 @@ std::vector<DataRecord> WebCrawler::crawl_urls(const std::vector<std::string>& u
                     std::vector<std::string> new_links = extract_links_from_html(record.content, url);
 
                     // Store link graph edges
-                    {
-                        std::lock_guard<std::mutex> lock(queue_mutex_);
-                        for (const auto& link : new_links) {
-                            db_manager_->add_link_edge(normalized, link);
-                            report_link_edge(normalized, link);
-                        }
+                    for (const auto& link : new_links) {
+                        db_manager_->add_link_edge(normalized, link);
+                        report_link_edge(normalized, link);
                     }
-
+                    
                     // Filter out already visited links and enqueue to RocksDB
                     std::vector<std::string> unvisited_links;
-                    {
-                        std::lock_guard<std::mutex> lock(queue_mutex_);
-                        for (const auto& link : new_links) {
-                            if (visited_urls_memory_.find(link) == visited_urls_memory_.end() &&
-                                !db_manager_->is_visited(link)) {
-                                unvisited_links.push_back(link);
-                                db_manager_->enqueue_url(link, kDiscoveredPriority);
-                            }
+                    for (const auto& link : new_links) {
+                        if (visited_urls_memory_.find(link) == visited_urls_memory_.end() && !db_manager_->is_visited(link)) {
+                            unvisited_links.push_back(link);
+                            db_manager_->enqueue_url(link, kDiscoveredPriority);  // Persist to RocksDB
                         }
                     }
                     
@@ -1711,24 +1716,6 @@ bool WebCrawler::should_stop() const {
         return true;
     }
     return false;
-}
-
-bool WebCrawler::ensure_db_initialized() {
-    std::lock_guard<std::mutex> lock(queue_mutex_);
-    if (db_initialized_) {
-        return true;
-    }
-    if (!db_manager_) {
-        log_error("RocksDBManager not initialized");
-        return false;
-    }
-    if (!db_manager_->init()) {
-        log_error("Failed to initialize RocksDB for queue management");
-        return false;
-    }
-    db_initialized_ = true;
-    log_info("RocksDB initialized successfully");
-    return true;
 }
 
 void WebCrawler::report_request_metric(const std::string& url,
